@@ -1,0 +1,52 @@
+engine:
+  host: 0.0.0.0
+  uvicorn_log_level: warning
+  port: 5000
+  model: /share/pi05_models/openpi05_base/flagscale_pi05.safetensors  # Path to Pi0.5 model checkpoint
+  tokenizer: /share/pi05_models/openpi05_base/paligemma_tokenizer.model
+  stat_path: /share/pi05_models/openpi05_base/assets/physical-intelligence/libero/norm_stats.json
+  pi05_config:
+    num_heads: 8
+    num_kv_heads: 1
+    head_dim: 256
+    num_layers: 18
+    vocab_size: 257152
+    paligemma_width: 2048
+    action_expert_width: 1024
+    ffn_dim: 16384
+    action_expert_ffn_dim: 4096
+    action_dim: 32
+    action_horizon: 10
+    max_seq_len: 8192
+    dropout: 0.0
+  pi05_siglip_weights: /share/pi05_models/openpi05_base_pytorch/model.safetensors
+  loader: pi05
+  results_path: ${experiment.exp_dir}/results
+  device: "cuda"
+  output_format: image
+  torch_dtype: float32
+  num_state_bins: 256
+  transformations:
+    LogIOTransformation:
+      log_level: "info"
+    StateScopeTransformation:
+      {}
+
+generate:
+  images_keys:
+    - observation.images.camera0
+    - observation.images.camera1
+    - observation.images.camera2
+  images_shape: [3, 224, 224]  # Pi0.5 uses 224x224 input
+  batch_size: 2
+  action_dim: 32  # π₀.₅标准动作维度
+  action_horizon: 10  # π₀.₅标准动作视野
+  state_dim: 8  # Pi0.5 state dimension (8-dimensional continuous state)
+  state_key: observation.state
+  flow_matching_noise: 0.1
+  num_steps: 8
+  instruction:
+    task:
+      - "Pick up the red object and place it in the container."
+      - "Open the drawer and place the item inside."
+      - "Close the door after placing the object."

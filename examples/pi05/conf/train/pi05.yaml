@@ -1,0 +1,115 @@
+system:
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  context_parallel_size: 1
+  wandb_enabled: false
+  seed: ${experiment.seed}
+  project_name: ${experiment.exp_name}
+  exp_name: ${experiment.exp_name}
+  batch_size: 4
+  train_steps: 1000
+  log_freq: 10
+  output_directory: ${experiment.exp_dir}/ckpt
+  tokenizer_max_length: 200
+
+model:
+  type: pi05
+  checkpoint_dir: /share/pi05_models
+  pretrain_weights: /share/pi05_models/openpi05_base/flagscale_pi05.safetensors
+  siglip_weights: /share/pi05_models/openpi05_base_pytorch/model.safetensors
+  max_token_len: 200
+  vision_config:
+    hidden_size: 2048
+    intermediate_size: 16384
+    num_hidden_layers: 22
+    num_attention_heads: 16
+    image_size: 224
+    patch_size: 14
+    vocab_size: 257344
+  text_config:
+    hidden_size: 3072
+    intermediate_size: 24576
+    num_hidden_layers: 26
+    num_attention_heads: 16
+    vocab_size: 257344
+  expert_config:
+    hidden_size: 1024
+    intermediate_size: 8192
+    num_hidden_layers: 12
+    num_attention_heads: 16
+  loss_weights:
+    flow_matching: 1.0
+    knowledge_insulation: 0.1
+    state_consistency: 0.5
+    vision_language_alignment: 0.2
+
+data:
+  data_path: /share/pi05_datasets/Rhx11111/pi05_libero_data/libero_1_head_cam_only_1000_chunk
+  tokenizer_path: /share/pi05_models/openpi05_base/paligemma_tokenizer.model
+  stat_path: /share/pi05_models/openpi05_base/assets/physical-intelligence/libero/norm_stats.json
+  state_dim: 8
+  action_dim: 32
+  action_horizon: 10
+  action_steps: 10
+  num_state_bins: 256
+  image_size: [224, 224]
+  batch_size: 4
+  num_workers: 2
+  pin_memory: true
+  drop_last: true
+  shuffle: true
+
+training:
+  epochs: 100
+  num_epochs: 100
+  use_amp: true
+  save_interval: 5
+  eval_interval: 10
+  log_interval: 10
+  gradient_accumulation_steps: 2
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1e-8
+  lr_scheduler:
+    name: cosine
+    warmup_steps: 1000
+    max_steps: 100000
+    min_lr: 1e-6
+  optimizer:
+    name: adamw
+    lr: 1e-4
+    weight_decay: 0.01
+
+mixed_precision:
+  enabled: true
+  loss_scale: "dynamic"
+  init_scale: 65536
+
+distributed:
+  data_parallel_size: ${oc.env:WORLD_SIZE,1}
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  sequence_parallel: true
+  use_distributed_optimizer: true
+
+logging:
+  use_wandb: true
+  wandb_project: pi05_training
+  wandb_entity: flagscale
+  log_dir: ${experiment.exp_dir}/logs
+  tensorboard_log_dir: ${experiment.exp_dir}/tensorboard
+
+checkpoint:
+  save_dir: ${experiment.exp_dir}/checkpoints
+  save_interval: 5
+  keep_last_n: 3
+  export_for_inference: true
+
+flow_matching:
+  noise_schedule: linear
+  num_steps: 100
+  noise_scale: 0.1
+  clip_min: -1.0
+  clip_max: 1.0

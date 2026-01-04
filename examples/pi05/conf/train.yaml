@@ -1,0 +1,28 @@
+defaults:
+- _self_
+- train: pi05
+
+experiment:
+  exp_name: pi05
+  seed: 42
+  exp_dir: outputs/${experiment.exp_name}
+  task:
+    type: train
+    backend: pi05
+    entrypoint: flagscale/train/train_pi05.py
+  runner:
+    backend: torchrun
+    nnodes: 1
+    per_node_task: false
+    no_shared_fs: false
+    rdzv_backend: static
+    hostfile: null
+  envs:
+    CUDA_DEVICE_MAX_CONNECTIONS: 1
+    NCCL_DEBUG: INFO
+
+action: run
+
+hydra:
+  run:
+    dir: ${experiment.exp_dir}/hydra

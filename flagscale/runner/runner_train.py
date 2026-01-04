@@ -94,6 +94,25 @@ def _get_args_pi0(config: DictConfig):
     return args
 
 
+def _get_args_pi05(config: DictConfig):
+    assert config.experiment.task.backend == "pi05", "This function only supports pi05 backend."
+
+    # Convert the DictConfig to a regular dictionary and create a temporary config file
+    import json
+
+    config_dict = OmegaConf.to_container(config, resolve=True)
+    train_config = config_dict["train"]
+
+    temp_dir = config_dict["experiment"]["exp_dir"]
+    os.makedirs(temp_dir, exist_ok=True)
+    config_file_path = os.path.join(temp_dir, "pi05_train_config.json")
+
+    with open(config_file_path, "w") as f:
+        json.dump(train_config, f, indent=2)
+
+    return ["--config", config_file_path]
+
+
 def _update_config_train(config: DictConfig):
     exp_dir = os.path.abspath(config.experiment.exp_dir)
     if not os.path.isdir(exp_dir):
@@ -402,6 +421,8 @@ class SSHTrainRunner(RunnerBase):
             self.user_args = _get_args_robotics(self.config)
         elif self.config.experiment.task.backend == "pi0":
             self.user_args = _get_args_pi0(self.config)
+        elif self.config.experiment.task.backend == "pi05":
+            self.user_args = _get_args_pi05(self.config)
         self.rdzv_id = datetime.now().strftime("%Y%m%d_%H%M%S.%f")
         self.user_envs = self.config.experiment.get("envs", {})
         self.user_script = self.config.experiment.task.entrypoint

@@ -1,0 +1,3 @@
+experiment:
+  runner:
+    nproc_per_node: ${oc.env:NPROC_PER_NODE,1}

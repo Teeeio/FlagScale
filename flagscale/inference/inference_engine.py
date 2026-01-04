@@ -11,11 +11,12 @@ import torch.nn as nn
 
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.utils import export_to_video
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from flagscale.inference.runtime_context import RuntimeContext
 from flagscale.inference.utils import parse_torch_dtype
 from flagscale.models.pi0.modeling_pi0 import PI0Policy, PI0PolicyConfig
+from flagscale.models.pi05 import Pi05Model
 from flagscale.runner.utils import logger
 from flagscale.transformations import create_transformations_from_config
 
@@ -105,7 +106,7 @@ class ModelLoadConfig:
             raise ValueError("'model' is required")
         if not self.loader:
             raise ValueError("'loader' is required")
-        allowed_loaders = {"diffusers", "transformers", "custom", "auto", "pi0"}
+        allowed_loaders = {"diffusers", "transformers", "custom", "auto", "pi0", "pi05"}
         if self.loader not in allowed_loaders:
             raise ValueError(f"Unsupported loader: {self.loader}. Allowed: {allowed_loaders}")
 
@@ -191,6 +192,66 @@ class InferenceEngine:
             policy.eval()
             logger.info(f"PI0 loaded: {time.time() - t_s:.2f}s")
             return policy, policy.model
+        elif loader == "pi05":
+            t_s = time.time()
+            default_config = {
+                "num_heads": 8,
+                "num_kv_heads": 1,
+                "head_dim": 256,
+                "num_layers": 18,
+                "vocab_size": 257152,
+                "paligemma_width": 2048,
+                "action_expert_width": 1024,
+                "ffn_dim": 16384,
+                "action_expert_ffn_dim": 4096,
+                "action_dim": 32,
+                "action_horizon": 10,
+                "max_seq_len": 8192,
+                "dropout": 0.0,
+            }
+
+            model_cfg = {}
+            components = self.vconfig.model.components
+            if components:
+                if isinstance(components, DictConfig):
+                    components = OmegaConf.to_container(components, resolve=True)
+                if isinstance(components, dict):
+                    model_cfg = components.get("pi05_config", components) or {}
+            if not isinstance(model_cfg, dict):
+                model_cfg = {}
+            if model_cfg:
+                merged = default_config.copy()
+                merged.update(model_cfg)
+                model_cfg = merged
+            else:
+                model_cfg = default_config
+
+            # Initialize Pi0.5 model
+            model = Pi05Model(**model_cfg)
+
+            # Load pretrained weights if available
+            model_path = self.vconfig.model.model
+            if model_path and os.path.exists(model_path):
+                try:
+                    logger.info(f"Loading Pi0.5 weights from: {model_path}")
+                    checkpoint = torch.load(model_path, map_location="cpu")
+                    if "model" in checkpoint:
+                        state_dict = checkpoint["model"]
+                    else:
+                        state_dict = checkpoint
+                    model.load_state_dict(state_dict, strict=False)
+                    logger.info(f"Successfully loaded Pi0.5 weights")
+                except Exception as e:
+                    logger.warning(f"Could not load pretrained weights: {e}")
+                    logger.info("Proceeding with randomly initialized model")
+            else:
+                logger.info("No pretrained weights specified, using randomly initialized model")
+
+            # Move to device and set to eval mode
+            model = model.to(device=self.vconfig.model.device)
+            model.eval()
+            logger.info(f"Pi0.5 loaded: {time.time() - t_s:.2f}s")
+            return model, model
         else:
             raise ValueError(f"Unsupported loader: {loader}")
 
