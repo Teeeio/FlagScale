@@ -56,6 +56,8 @@ ModelScope:
 modelscope download --model google/paligemma-3b-pt-224 \
   --include tokenizer.model \
   --local_dir /share/pi05_models/openpi05_base
+mv /share/pi05_models/openpi05_base/tokenizer.model \
+  /share/pi05_models/openpi05_base/paligemma_tokenizer.model
 ```
 
 ## Convert Weights
@@ -108,6 +110,14 @@ modelscope download --model heart6/openpi05_base \
 # Training
 
 ## Prepare Dataset
+
+Install a dataset loader (lerobot preferred, datasets is the fallback):
+
+```sh
+pip install lerobot
+# or
+pip install datasets
+```
 
 Only use the official dataset:
 

@@ -172,14 +172,21 @@ class Pi05Trainer:
             self.world_size = int(os.environ['WORLD_SIZE'])
             self.local_rank = int(os.environ.get('LOCAL_RANK', 0))
 
-            torch.cuda.set_device(self.local_rank)
-            dist.init_process_group(
-                backend='nccl',
-                init_method='env://',
-                world_size=self.world_size,
-                rank=self.rank
-            )
-            self.device = torch.device(f'cuda:{self.local_rank}')
+            if self.world_size > 1:
+                torch.cuda.set_device(self.local_rank)
+                dist.init_process_group(
+                    backend='nccl',
+                    init_method='env://',
+                    world_size=self.world_size,
+                    rank=self.rank
+                )
+                self.device = torch.device(f'cuda:{self.local_rank}')
+            else:
+                # Treat single-process torchrun as non-distributed to avoid NCCL hang.
+                self.rank = 0
+                self.world_size = 1
+                self.local_rank = 0
+                self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.rank = 0
             self.world_size = 1
@@ -264,12 +271,7 @@ class Pi05Trainer:
                 output_device=self.local_rank,
                 find_unused_parameters=True,  # Pi05有条件分支
             )
-            self.vision = torch.nn.parallel.DistributedDataParallel(
-                self.vision,
-                device_ids=[self.local_rank],
-                output_device=self.local_rank,
-                find_unused_parameters=True,
-            )
+            # Vision encoder runs under no_grad, so avoid DDP to prevent hanging on unused grads.
 
         if self.rank == 0:
             self.logger.info("✅ 模型设置完成")
