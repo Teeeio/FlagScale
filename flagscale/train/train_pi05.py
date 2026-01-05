@@ -746,7 +746,11 @@ def main():
     trainer = Pi05Trainer(config)
 
     # 开始训练
-    trainer.train()
+    try:
+        trainer.train()
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == '__main__':

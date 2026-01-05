@@ -10,6 +10,7 @@ from __future__ import annotations
 import inspect
 import io
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
@@ -19,6 +20,8 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from flagscale.models.pi05.tokenizer import DEFAULT_TOKENIZER_PATH, PaligemmaTokenizer
+
+logger = logging.getLogger(__name__)
 
 
 class DataTransformFn(Protocol):
@@ -419,9 +422,21 @@ def create_pi05_dataloader(
             drop_last=drop_last,
         )
 
+    per_rank_batch_size = batch_size
+    if sampler is not None:
+        world_size = torch.distributed.get_world_size()
+        per_rank_batch_size = batch_size // world_size
+        if per_rank_batch_size < 1:
+            message = (
+                "Distributed batch_size must be >= world_size "
+                f"(batch_size={batch_size}, world_size={world_size})."
+            )
+            logger.error(message)
+            raise ValueError(message)
+
     return DataLoader(
         dataset,
-        batch_size=batch_size if sampler is None else batch_size // torch.distributed.get_world_size(),
+        batch_size=per_rank_batch_size,
         shuffle=(sampler is None and shuffle),
         sampler=sampler,
         num_workers=num_workers,
