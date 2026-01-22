@@ -4,8 +4,8 @@ Training configuration models using Pydantic.
 
 from typing import Any
 
-from omegaconf import OmegaConf
-from pydantic import BaseModel, Field, field_validator
+from omegaconf import DictConfig, OmegaConf
+from pydantic import BaseModel, Field
 
 
 class OptimizerConfig(BaseModel):
@@ -37,6 +37,8 @@ class CheckpointConfig(BaseModel):
 class SystemConfig(BaseModel):
     """Training loop configuration"""
 
+    model_config = {"extra": "allow", "arbitrary_types_allowed": True}
+
     batch_size: int = 1
     train_steps: int = 100000
     log_freq: int = 10
@@ -48,16 +50,32 @@ class SystemConfig(BaseModel):
     optimizer: OptimizerConfig
     scheduler: SchedulerConfig
     checkpoint: CheckpointConfig
+    raw: DictConfig | None = Field(default=None, exclude=True)
+
+    def __getattr__(self, name):
+        raw = self.__dict__.get("raw")
+        if raw is not None and hasattr(raw, name):
+            return getattr(raw, name)
+        raise AttributeError(name)
 
 
 class DataConfig(BaseModel):
     """Dataset configuration"""
+
+    model_config = {"extra": "allow", "arbitrary_types_allowed": True}
 
     data_path: str = Field(..., description="Path to training dataset")
     tolerance_s: float = 0.0001
     use_imagenet_stats: bool = True
     rename_map: dict[str, str] | None = None
     use_quantiles: bool = False
+    raw: DictConfig | None = Field(default=None, exclude=True)
+
+    def __getattr__(self, name):
+        raw = self.__dict__.get("raw")
+        if raw is not None and hasattr(raw, name):
+            return getattr(raw, name)
+        raise AttributeError(name)
 
 
 class ModelConfig(BaseModel):
@@ -72,18 +90,28 @@ class ModelConfig(BaseModel):
     All other fields are passed through to the model's config class.
     """
 
-    model_config = {"extra": "allow"}  # Allow extra fields for model-specific config
+    model_config = {
+        "extra": "allow",
+        "arbitrary_types_allowed": True,
+    }  # Allow extra fields for model-specific config
 
     # Required fields to identify which model and checkpoint to use
     model_name: str = Field(..., description="Model name: 'pi0' or 'pi0.5'")
     checkpoint_dir: str = Field(..., description="Path to pretrained model checkpoint")
+    raw: DictConfig | None = Field(default=None, exclude=True)
 
-    @field_validator("model_name")
-    @classmethod
-    def validate_model_name(cls, v):
-        if v not in ["pi0", "pi0.5"]:
-            raise ValueError(f"Invalid model_name: {v}. Must be 'pi0' or 'pi0.5'")
-        return v
+    def __getattr__(self, name):
+        raw = self.__dict__.get("raw")
+        if raw is not None and hasattr(raw, name):
+            return getattr(raw, name)
+        raise AttributeError(name)
+
+    # @field_validator("model_name")
+    # @classmethod
+    # def validate_model_name(cls, v):
+    #     if v not in ["pi0", "pi0.5"]:
+    #         raise ValueError(f"Invalid model_name: {v}. Must be 'pi0' or 'pi0.5'")
+    #     return v
 
     def get_model_config_dict(self) -> dict[str, Any]:
         """Get all model-specific config fields (excluding train-level fields)."""
@@ -100,10 +128,13 @@ class TrainConfig(BaseModel):
     @classmethod
     def from_hydra_config(cls, hydra_config) -> "TrainConfig":
         """Convert Hydra DictConfig to Pydantic TrainConfig"""
-        train_dict = OmegaConf.to_container(hydra_config.train, resolve=True)
+        train = hydra_config.train
+        train_dict = OmegaConf.to_container(train, resolve=True)
+        train_dict["system"] = SystemConfig(**train_dict["system"], raw=train.system)
+        train_dict["data"] = DataConfig(**train_dict["data"], raw=train.data)
+        train_dict["model"] = ModelConfig(**train_dict["model"], raw=train.model)
         return cls(**train_dict)
 
     class Config:
         # Allow arbitrary types for complex objects
         arbitrary_types_allowed = True
-

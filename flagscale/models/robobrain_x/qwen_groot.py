@@ -55,14 +55,14 @@ class Qwen_GR00T(PreTrainedModel):
         self.config = config
         self.qwen_vl_interface = _QWen_VL_Interface(config=self.config)
         # align dims --> we should put them to config or no?
-        self.config.framework.action_model.diffusion_model_cfg.cross_attention_dim = (
+        self.config.model.action_model.diffusion_model_cfg.cross_attention_dim = (
             self.qwen_vl_interface.model.config.hidden_size
         )
 
         self.action_model = FlowmatchingActionHead(full_config=self.config)
 
-        self.future_action_window_size = config.framework.action_model.future_action_window_size
-        self.past_action_window_size = config.framework.action_model.past_action_window_size
+        self.future_action_window_size = config.model.action_model.future_action_window_size
+        self.past_action_window_size = config.model.action_model.past_action_window_size
         self.chunk_len = self.past_action_window_size + 1 + self.future_action_window_size
 
     def forward(self, examples: list[dict] | None = None, **kwargs) -> tuple:
@@ -101,8 +101,8 @@ class Qwen_GR00T(PreTrainedModel):
             ]  # (B, chunk_len, action_dim)
 
             repeated_diffusion_steps = (
-                self.config.trainer.get("repeated_diffusion_steps", 4)
-                if self.config and self.config.trainer
+                self.config.system.get("repeated_diffusion_steps", 4)
+                if self.config and self.config.system
                 else 4
             )
             actions_target_repeated = actions_target.repeat(repeated_diffusion_steps, 1, 1)
@@ -152,7 +152,7 @@ class Qwen_GR00T(PreTrainedModel):
             dict:
                 normalized_actions (np.ndarray): Shape [B, T, action_dim], diffusion-sampled normalized actions.
         """
-        train_obs_image_size = getattr(self.config.datasets.vla_data, "image_size", None)
+        train_obs_image_size = getattr(self.config.data.vla_data, "image_size", None)
         if train_obs_image_size:
             batch_images = resize_images(batch_images, target_size=train_obs_image_size)
 

@@ -1,5 +1,5 @@
-# Mainly adopted from starVLA/starVLA:
-# https://github.com/starVLA/starVLA/blob/starVLA/starVLA/model/modules/vlm/QWen2_5.py
+# Mainly adopted from:
+# https://github.com/starVLA/starVLA/blob/3f7feefbc5fc25890ad3a7d262b8a0aea1339aa7/starVLA/model/modules/vlm/QWen2_5.py
 # Below is the original copyright:
 
 # Copyright 2025 starVLA community. All rights reserved.
@@ -18,7 +18,7 @@ VIDEO_TOKEN_INDEX = 151656
 DEFAULT_IMAGE_TOKEN = "<image>"
 DEFAULT_VIDEO_TOKEN = "<video>"
 
-_ACTION_TOKEN_MIN = 151665  # how can we know this range? --> we has other way for this, but is slower see qwenhelix branch
+_ACTION_TOKEN_MIN = 151665  # how can we know this range?
 _ACTION_TOKEN_MAX = 153712  # here only for fast_tokenizer, see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md
 
 
@@ -82,7 +82,6 @@ class _QWen_VL_Interface(nn.Module):
             # attn_implementation="flash_attention_2",
             attn_implementation=qwenvl_config.get("attn_implementation", "eager"),
             torch_dtype="auto",
-            device_map="cuda",
         )
         processor = AutoProcessor.from_pretrained(model_id)
         processor.tokenizer.padding_side = "left"
@@ -90,6 +89,9 @@ class _QWen_VL_Interface(nn.Module):
         self.model = model
         self.processor = processor
         self.config = config
+
+        self._ACTION_TOKEN_MIN = _ACTION_TOKEN_MIN
+        self._ACTION_TOKEN_MAX = _ACTION_TOKEN_MAX
 
     def forward(
         self,
@@ -150,7 +152,10 @@ class _QWen_VL_Interface(nn.Module):
 
         return outputs
 
-    def generate(self, **kwargs):
+    def generate(
+        self,
+        **kwargs,
+    ):
         """
         High-level generation interface (auto-regressive decoding), optionally vision-conditioned.
 
@@ -160,7 +165,9 @@ class _QWen_VL_Interface(nn.Module):
             GenerateOutput | Model-dependent generation return.
         """
         with torch.autocast("cuda", dtype=torch.float16):
-            generation_output = self.model.generate(**kwargs)
+            generation_output = self.model.generate(
+                **kwargs,
+            )
         return generation_output
 
     def build_qwenvl_inputs(self, images, instructions, solutions=None, **kwargs):
@@ -257,7 +264,7 @@ class _QWen_VL_Interface(nn.Module):
             text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt"
         )
 
-        # if solutions, mask out the solution tokens in labels
+        # if solutions, mask out the non solution tokens in labels --> @JinhuiYE can we mask out system prompt?
         if solutions is not None:
             action_token_min = _ACTION_TOKEN_MIN  # how can we know this range? --> we has other way for this, but is slower see qwenhelix branch
             action_token_max = _ACTION_TOKEN_MAX  # here only for fast_tokenizer, see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md
@@ -285,24 +292,3 @@ class _QWen_VL_Interface(nn.Module):
             batch_input["labels"] = labels
 
         return batch_input.to(self.model.device)
-
-
-if __name__ == "__main__":
-    import argparse
-
-    from omegaconf import OmegaConf
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config_yaml",
-        type=str,
-        default="./examples/robotics/conf/train/libero_qwenpi.yaml",
-        help="Path to YAML config",
-    )
-    args, clipargs = parser.parse_known_args()
-
-    import pdb
-
-    pdb.set_trace()
-    cfg = OmegaConf.load(args.config_yaml)
-    model = _QWen_VL_Interface(config=cfg)

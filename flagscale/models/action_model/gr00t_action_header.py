@@ -1,5 +1,5 @@
-# Mainly adopted from starVLA/starVLA:
-# https://github.com/starVLA/starVLA/blob/starVLA/starVLA/model/modules/action_model/GR00T_ActionHeader.py
+# Mainly adopted from:
+# https://github.com/starVLA/starVLA/blob/3f7feefbc5fc25890ad3a7d262b8a0aea1339aa7/starVLA/model/modules/action_model/GR00T_ActionHeader.py
 # Below is the original copyright:
 
 # Copyright 2025 NVIDIA Corp. and affiliates. All rights reserved.
@@ -17,8 +17,11 @@ from torch.distributions import Beta
 from transformers import PretrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 
-from flagscale.models.robobrain_x.action_encoder import SinusoidalPositionalEncoding, swish
-from flagscale.models.robobrain_x.cross_attention_dit import DiT
+from flagscale.models.action_model.flow_matching_head.action_encoder import (
+    SinusoidalPositionalEncoding,
+    swish,
+)
+from flagscale.models.action_model.flow_matching_head.cross_attention_dit import DiT
 
 # TODO try to merge DiT Modules with follow_match_head, they are just the same arch, but diff loss, use diffusers package will be simple
 
@@ -34,6 +37,7 @@ class CategorySpecificLinear(nn.Module):
     def forward(self, x, cat_ids):
         selected_W = self.W[cat_ids]
         selected_b = self.b[cat_ids]
+        # import ipdb; ipdb.set_trace()
         return torch.bmm(x, selected_W) + selected_b.unsqueeze(1)
 
 
@@ -177,7 +181,8 @@ class FlowmatchingActionHeadConfig(PretrainedConfig):
         default=1000, metadata={"help": "Number of timestep discretization buckets."}
     )
     num_inference_timesteps: int = field(
-        default=None, metadata={"help": "Number of inference steps for noise diffusion."}
+        default=None,
+        metadata={"help": "Number of inference steps for noise diffusion."},
     )
     max_num_embodiments: int = field(default=32, metadata={"help": "Number of embodiments."})
     tune_projector: bool = field(default=True, metadata={"help": "Whether to tune the projector."})
@@ -211,11 +216,13 @@ DiTConfig = {
 
 
 class FlowmatchingActionHead(nn.Module):
-    def __init__(self, full_config):
+    def __init__(
+        self,
+        full_config,
+    ):
         super().__init__()
         config = full_config.model.action_model
-        self.no_random = config.get("no_random", True)
-        self.hidden_size = config.hidden_size
+        self.hidden_size = config.hidden_size  # @JinhuiYE
         self.full_config = full_config
         action_model_type = config.action_model_type
         action_model_cfg = DiTConfig[action_model_type]
@@ -239,10 +246,13 @@ class FlowmatchingActionHead(nn.Module):
         )
 
         self.action_encoder = ActionEncoder(
-            action_dim=config.action_dim, hidden_size=self.input_embedding_dim
+            action_dim=config.action_dim,
+            hidden_size=self.input_embedding_dim,
         )
         self.action_decoder = MLP(
-            input_dim=self.hidden_size, hidden_dim=self.hidden_size, output_dim=self.action_dim
+            input_dim=self.model.config.output_dim,
+            hidden_dim=self.hidden_size,
+            output_dim=self.action_dim,
         )
         self.future_tokens = nn.Embedding(config.num_target_vision_tokens, self.input_embedding_dim)
         nn.init.normal_(self.future_tokens.weight, mean=0.0, std=0.02)
@@ -262,30 +272,29 @@ class FlowmatchingActionHead(nn.Module):
     def prepare_input(self, batch: dict) -> BatchFeature:
         return BatchFeature(data=batch)
 
-    def forward(self, vl_embs: torch.Tensor, actions: torch.Tensor, state: torch.Tensor = None):
+    def forward(
+        self,
+        vl_embs: torch.Tensor,
+        actions: torch.Tensor,
+        state: torch.Tensor = None,
+        encoder_attention_mask=None,
+    ):
         """
         vl_embs: shape (B, seq_length, feature_dim)
         actions: shape (B, future_action_window_size, D_action)
         """
         device = vl_embs.device
 
-        # action_mask: for counting valid dimensions in the last axis, used for loss computation
-        actual_action_dim = actions.shape[-1]
-
-        # Ensure actions last dim matches D_action, pad with zeros if needed
-        D_action = self.config.action_dim
-        if actions.shape[-1] < D_action:
-            pad_size = D_action - actions.shape[-1]
-            pad = torch.zeros(
-                *actions.shape[:-1], pad_size, device=actions.device, dtype=actions.dtype
+        # Validate action dimension
+        if actions.shape[-1] != self.action_dim:
+            raise ValueError(
+                f"Action dimension mismatch: model expects {self.action_dim} dimensions "
+                f"(from config), but received actions with {actions.shape[-1]} dimensions. "
+                f"Please update config.model.action_model.action_dim to match your data."
             )
-            actions = torch.cat([actions, pad], dim=-1)
 
         # Embed noised action trajectory.
-        if self.no_random:
-            noise = torch.ones(actions.shape, device=actions.device, dtype=actions.dtype)
-        else:
-            noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
+        noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
         t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
         t = t[:, None, None]  # shape (B,1,1) for broadcast
 
@@ -317,6 +326,7 @@ class FlowmatchingActionHead(nn.Module):
         model_output = self.model(
             hidden_states=sa_embs,
             encoder_hidden_states=vl_embs,
+            encoder_attention_mask=encoder_attention_mask,
             timestep=t_discretized,
             return_all_hidden_states=False,  # NOTE (YL): not using flare now
         )
@@ -324,8 +334,7 @@ class FlowmatchingActionHead(nn.Module):
         pred_actions = pred[:, -actions.shape[1] :]
 
         # Slice out only the action portion of pred and target.
-        # loss = ((pred_actions - velocity) ** 2).mean()
-        loss = ((pred_actions - velocity)[:, :, :actual_action_dim] ** 2).mean()
+        loss = ((pred_actions - velocity) ** 2).mean()
         return loss
 
     @torch.no_grad()
@@ -333,19 +342,11 @@ class FlowmatchingActionHead(nn.Module):
         # Set initial actions as the sampled noise.
         batch_size = vl_embs.shape[0]
         device = vl_embs.device
-
-        if self.no_random:
-            actions = torch.ones(
-                size=(batch_size, self.config.action_horizon, self.config.action_dim),
-                dtype=vl_embs.dtype,
-                device=device,
-            )
-        else:
-            actions = torch.randn(
-                size=(batch_size, self.config.action_horizon, self.config.action_dim),
-                dtype=vl_embs.dtype,
-                device=device,
-            )
+        actions = torch.randn(  # yes, here make sure action_horizon align with data loader? or share from client?
+            size=(batch_size, self.config.action_horizon, self.config.action_dim),
+            dtype=vl_embs.dtype,
+            device=device,
+        )
 
         num_steps = self.num_inference_timesteps
         dt = 1.0 / num_steps
@@ -378,7 +379,9 @@ class FlowmatchingActionHead(nn.Module):
 
             # Run model forward.
             model_output = self.model(
-                hidden_states=sa_embs, encoder_hidden_states=vl_embs, timestep=timesteps_tensor
+                hidden_states=sa_embs,
+                encoder_hidden_states=vl_embs,
+                timestep=timesteps_tensor,
             )
             pred = self.action_decoder(model_output)
 
@@ -408,9 +411,3 @@ def get_action_model(config=None):
         FlowmatchingActionHead: Initialized FlowMatchingActionHead.
     """
     return FlowmatchingActionHead(full_config=config)
-
-
-if __name__ == "__main__":
-    # TODO make each backbone.py can be debug independently
-
-    pass
