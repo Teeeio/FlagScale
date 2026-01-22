@@ -71,6 +71,37 @@ model:
       positional_embeddings: None
   reduce_in_full_precision: True
 
+  # ============================================================
+  # Module Freezing Configuration (NeMo-style pattern matching)
+  # ============================================================
+  # Freezing logic: freeze_patterns are applied first, then keep_patterns override.
+  # Patterns are regex matched against full parameter names.
+  #
+  # Common patterns for QwenGR00T:
+  #   - "qwen_vl_interface\\..*"                              # Entire VLM
+  #   - "qwen_vl_interface\\.model\\.visual\\..*"             # Vision encoder
+  #   - "qwen_vl_interface\\.model\\.model\\..*"              # Language model
+  #   - "qwen_vl_interface\\.model\\.model\\.layers\\.[0-9]\\."  # LLM layers 0-9
+  #   - "action_model\\..*"                                   # Action head
+  #   - "action_model\\.model\\.transformer_blocks\\.[0-7]\\."   # DiT blocks 0-7
+  #
+  freeze:
+  #   # SCENARIO A: Freeze VLM, train only action head
+    freeze_patterns:
+      - "qwen_vl_interface\\..*"
+  #
+  #   # SCENARIO B: Freeze VLM but keep projector trainable
+  #   # freeze_patterns:
+  #   #   - "qwen_vl_interface\\..*"
+  #   # keep_patterns:
+  #   #   - "qwen_vl_interface\\.model\\.visual\\.merger\\..*"
+  #
+  #   # SCENARIO C: Freeze everything except action decoder
+  #   # freeze_patterns:
+  #   #   - ".*"
+  #   # keep_patterns:
+  #   #   - "action_model\\.action_decoder\\..*"
+
 data:
   # TODO: (yupu) Remove this once we have a proper dataset config
   vla_data:

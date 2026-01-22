@@ -8,6 +8,26 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field
 
 
+class FreezeConfig(BaseModel):
+    """Pattern-based module freezing configuration (NeMo-style).
+
+    Freezing logic:
+    1. For each parameter, check if name matches any `freeze_patterns`
+    2. If matched, check if name also matches any `keep_patterns`
+    3. If matched by freeze but NOT by keep → freeze (requires_grad=False)
+
+    `keep_patterns` overrides `freeze_patterns` - this allows freezing a module
+    but keeping specific sub-components trainable.
+
+    Patterns are regex patterns matched against full parameter names.
+    """
+
+    model_config = {"extra": "allow"}
+
+    freeze_patterns: list[str] | None = None
+    keep_patterns: list[str] | None = None
+
+
 class OptimizerConfig(BaseModel):
     """Optimizer configuration"""
 
@@ -98,6 +118,7 @@ class ModelConfig(BaseModel):
     # Required fields to identify which model and checkpoint to use
     model_name: str = Field(..., description="Model name: 'pi0' or 'pi0.5'")
     checkpoint_dir: str = Field(..., description="Path to pretrained model checkpoint")
+    freeze: FreezeConfig | None = None
     raw: DictConfig | None = Field(default=None, exclude=True)
 
     def __getattr__(self, name):
@@ -115,7 +136,7 @@ class ModelConfig(BaseModel):
 
     def get_model_config_dict(self) -> dict[str, Any]:
         """Get all model-specific config fields (excluding train-level fields)."""
-        return self.model_dump(exclude={"model_name", "checkpoint_dir"})
+        return self.model_dump(exclude={"model_name", "checkpoint_dir", "freeze"})
 
 
 class TrainConfig(BaseModel):

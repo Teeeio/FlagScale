@@ -56,6 +56,7 @@ from flagscale.train.utils.train_utils import (
     get_step_checkpoint_dir,
     update_last_checkpoint,
 )
+from flagscale.train.utils.optim_utils import apply_freeze_config, log_trainable_params
 from flagscale.models.qwen_gr00t.qwen_gr00t import QwenGR00T
 
 IMAGENET_STATS = {
@@ -294,15 +295,13 @@ def make_policy(
 
     # FIXME
     policy.to("cuda")
-    # assert isinstance(policy, torch.nn.Module)
 
-    # policy = torch.compile(policy, mode="reduce-overhead")
+    # Apply freeze config if specified
+    freeze_config = getattr(config.model, "freeze", None)
+    trainable_params = apply_freeze_config(policy, freeze_config)
+    log_trainable_params(policy)
 
-    # if not rename_map:
-    #     validate_visual_features_consistency(cfg, features)
-    # TODO: (jadechoghari) - add a check_state(cfg, features) and check_action(cfg, features)
-
-    return policy, input_features, output_features
+    return policy, input_features, output_features, trainable_params
 
 
 class ProcessorConfigKwargs(TypedDict, total=False):
@@ -659,7 +658,7 @@ def main(config: TrainConfig, seed: int):
 
     dist.barrier()
 
-    policy, input_features, output_features = make_policy(config=config, ds_meta=dataset.meta)
+    policy, input_features, output_features, trainable_params = make_policy(config=config, ds_meta=dataset.meta)
 
     dist.barrier()
 
@@ -844,9 +843,13 @@ def main(config: TrainConfig, seed: int):
     if isinstance(optimizer_betas, list):
         optimizer_betas = tuple(optimizer_betas)
 
-    # TODO: (yupu) Should we let the user choose between config and policy preset?
+    # Apply freeze config if specified and get trainable parameters
+    freeze_config = getattr(policy.config, "freeze", None)
+    trainable_params = apply_freeze_config(policy, freeze_config)
+    log_trainable_params(policy)
+
     optimizer = torch.optim.AdamW(
-        policy.parameters(),
+        trainable_params,
         lr=config.system.optimizer.lr,
         betas=optimizer_betas,
         eps=config.system.optimizer.eps,
