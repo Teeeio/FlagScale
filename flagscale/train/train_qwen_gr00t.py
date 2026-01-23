@@ -43,7 +43,11 @@ from flagscale.models.utils.constants import (
 from flagscale.models.configs.types import PolicyFeature
 from flagscale.models.utils.constants import ACTION, OBS_PREFIX, REWARD
 from flagscale.models.configs.types import FeatureType
-from flagscale.train.utils.logging_utils import AverageMeter, MetricsTracker
+from flagscale.train.utils.logging_utils import (
+    AverageMeter,
+    MetricsTracker,
+    format_big_number,
+)
 from flagscale.train.utils.train_utils import (
     save_checkpoint,
     get_step_checkpoint_dir,
@@ -65,10 +69,13 @@ def set_seed(seed: int):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cuda.matmul.allow_tf32 = True
+    # torch.backends.cudnn.enabled = True
+    # torch.backends.cudnn.benchmark = True
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cuda.matmul.allow_tf32 = False
 
 
 def init_ddp():
@@ -210,6 +217,21 @@ def raise_feature_mismatch_error(
         f'  --rename_map=\'{{"observation.images.left": "observation.images.camera1", '
         f'"observation.images.top": "observation.images.camera2"}}\''
     )
+
+
+def format_train_tracker_step(train_tracker: MetricsTracker) -> str:
+    def _format_meter_val(meter: AverageMeter) -> str:
+        fmt = meter.fmt[1:] if meter.fmt.startswith(":") else meter.fmt
+        return f"{meter.name}:{format(meter.val, fmt)}"
+
+    display_list = [
+        f"step:{format_big_number(train_tracker.steps)}",
+        f"smpl:{format_big_number(train_tracker.samples)}",
+        f"ep:{format_big_number(train_tracker.episodes)}",
+        f"epch:{train_tracker.epochs:.2f}",
+        *[_format_meter_val(m) for m in train_tracker.metrics.values()],
+    ]
+    return " ".join(display_list)
 
 
 # def validate_visual_features_consistency(
@@ -500,6 +522,7 @@ def update_policy(
     policy,
     batch: Any,
     optimizer: Optimizer,
+    use_amp: bool,
     grad_clip_norm: float,
     lr_scheduler=None,
     lock=None,
@@ -529,27 +552,15 @@ def update_policy(
 
     # Get the policy model (unwrap DDP if needed) to access config
     policy_model = policy.module if isinstance(policy, DDP) else policy
-    use_amp = getattr(policy_model.config, "use_amp", False)
+
+    print(f"use_amp: {use_amp}")
 
     autocast_context = (
         torch.amp.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
     )
     with autocast_context:
-        output = policy.forward(batch)
-
-    # Handle different return types from policy.forward()
-    # QwenGR00T returns dict like {'action_loss': tensor}
-    # PI0/PI05 returns (loss_tensor, info_dict)
-    if isinstance(output, dict):
-        loss = output.get("action_loss") or output.get("loss")
-        if loss is None:
-            loss = sum(v for v in output.values() if isinstance(v, torch.Tensor))
-    elif isinstance(output, tuple):
-        loss = output[0]
-    else:
-        loss = output
-
-    loss.backward()
+        loss = policy.forward(batch)
+        loss.backward()
 
     # Clip gradients if specified
     if grad_clip_norm > 0:
@@ -712,14 +723,20 @@ def main(config: TrainConfig, seed: int):
             batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
+        # print(f"batch: {batch}")
+
+        st = time.perf_counter()
         train_tracker = update_policy(
             train_tracker,
             policy,
             batch,
             optimizer,
-            config.system.grad_clip_norm,
+            use_amp=config.system.use_amp,
+            grad_clip_norm=config.system.grad_clip_norm,
             lr_scheduler=lr_scheduler,
         )
+        print(f"update_policy time: {time.perf_counter() - st}")
+        print(f"train_tracker at step {step}: {format_train_tracker_step(train_tracker)}")
 
         step += 1
         train_tracker.step()
@@ -731,7 +748,7 @@ def main(config: TrainConfig, seed: int):
             sampler.set_epoch(epoch)
 
         if step % config.system.log_freq == 0 and is_main_process:
-            logger.info(f"step: {step} {train_tracker}")
+            logger.info(f"step: {step} {format_train_tracker_step(train_tracker)}")
 
         if (
             config.system.checkpoint.save_checkpoint

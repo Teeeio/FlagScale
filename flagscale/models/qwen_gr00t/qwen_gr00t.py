@@ -75,7 +75,7 @@ class QwenGR00T(PreTrainedModel):
         **kwargs,
     ) -> tuple:
         """ """
-        # FIXME
+        # FIXME: state is None
         # from torchvision import transforms
         # image_transform = transforms.ToPILImage()
 
@@ -96,6 +96,9 @@ class QwenGR00T(PreTrainedModel):
             image_keys=["observation.images.image", "observation.images.wrist_image"],
             # images=batch_images, instructions=instructions
         )
+
+        # print(f"qwen_inputs: {qwen_inputs}")
+
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface(
                 **qwen_inputs,
@@ -108,6 +111,13 @@ class QwenGR00T(PreTrainedModel):
 
         # Step 4: Action Expert Forward and Loss
         with torch.autocast("cuda", dtype=torch.float32):
+            # TODO: (yupu) Is this a bug or a feature? The action dtype would stay as bf16 under this autocast.
+            if isinstance(actions, torch.Tensor):
+                actions = actions.to(device=last_hidden.device, dtype=last_hidden.dtype)
+            else:
+                actions = torch.tensor(
+                    np.array(actions), device=last_hidden.device, dtype=last_hidden.dtype
+                )
             # TODO: does not match RoboBrainX, need to check
             # actions = torch.tensor(
             #     np.array(actions), device=last_hidden.device, dtype=last_hidden.dtype
@@ -116,11 +126,12 @@ class QwenGR00T(PreTrainedModel):
                 :, -(self.future_action_window_size + 1) :, :
             ]  # (B, chunk_len, action_dim)
 
-            repeated_diffusion_steps = (
-                self.config.system.get("repeated_diffusion_steps", 4)
-                if self.config and self.config.system
-                else 4
+            # TODO: (yupu) I believe there is a bug in starVLA, the
+            # `repeated_diffusion_steps` is not properly set in the config.
+            repeated_diffusion_steps = self.config.model.action_model.get(
+                "repeated_diffusion_steps", 4
             )
+
             actions_target_repeated = actions_target.repeat(repeated_diffusion_steps, 1, 1)
             last_hidden_repeated = last_hidden.repeat(repeated_diffusion_steps, 1, 1)
 
@@ -135,7 +146,7 @@ class QwenGR00T(PreTrainedModel):
                 last_hidden_repeated, actions_target_repeated, state_repeated
             )  # (B, chunk_len, action_dim)
 
-        return {"action_loss": action_loss}
+        return action_loss
 
     @torch.inference_mode()
     def predict_action(
@@ -154,7 +165,7 @@ class QwenGR00T(PreTrainedModel):
         """
         if type(examples) is not list:
             examples = [examples]
-        batch_images = [to_pil_preserve(example["image"]) for example in examples]  #  [B，[PLT]]
+        batch_images = [to_pil_preserve(example["image"]) for example in examples]  # [B, [PLT]]
         instructions = [example["lang"] for example in examples]  # [B, str]
 
         state = (
