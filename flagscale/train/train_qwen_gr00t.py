@@ -112,7 +112,7 @@ def make_dataset(cfg: DataConfig):
     # TODO: (yupu) Support image transforms
     enable_image_transform = False
     # TODO: (yupu) Remove hard-coded video backend
-    video_backend = "pyav"
+    video_backend = "torchcodec"
 
     # image_transforms = ImageTransforms(cfg.image_transforms) if enable_image_transform else None
 
@@ -649,8 +649,6 @@ def main(config: TrainConfig, seed: int):
         drop_last=False,
     )
 
-    num_workers = 0  # config.system.num_workers
-
     dataloader = torch.utils.data.DataLoader(
         dataset,
         num_workers=num_workers,
@@ -749,6 +747,7 @@ def main(config: TrainConfig, seed: int):
 
         if step % config.system.log_freq == 0 and is_main_process:
             logger.info(f"step: {step} {format_train_tracker_step(train_tracker)}")
+            train_tracker.reset_averages()
 
         if (
             config.system.checkpoint.save_checkpoint
