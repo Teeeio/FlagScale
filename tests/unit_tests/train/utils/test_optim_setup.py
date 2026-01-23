@@ -1,15 +1,19 @@
-"""Unit tests for pattern-based module freezing utilities."""
+"""Unit tests for optimizer setup utilities."""
 
 import unittest
 from unittest.mock import MagicMock, patch
 
+import torch
 import torch.nn as nn
 
-from flagscale.train.utils.optim_utils import (
+from flagscale.train.utils.optim_setup import (
     apply_freeze_config,
+    build_optim_param_groups,
     freeze_and_get_trainable_params,
     log_trainable_params,
     print_param_names,
+    setup_optimizer_and_scheduler,
+    setup_scheduler,
 )
 
 
@@ -339,7 +343,7 @@ class TestUnusedPatternWarnings(unittest.TestCase):
     def setUp(self):
         self.model = SimpleModel()
 
-    @patch("flagscale.train.utils.optim_utils.logger")
+    @patch("flagscale.train.utils.optim_setup.logger")
     def test_warns_on_unused_freeze_pattern(self, mock_logger):
         """Should warn when freeze pattern matches nothing."""
         list(
@@ -352,9 +356,9 @@ class TestUnusedPatternWarnings(unittest.TestCase):
 
         mock_logger.warning.assert_called()
         warning_call = mock_logger.warning.call_args[0][0]
-        self.assertIn("Freeze patterns matched NOTHING", warning_call)
+        self.assertIn("Freeze patterns matched nothing", warning_call)
 
-    @patch("flagscale.train.utils.optim_utils.logger")
+    @patch("flagscale.train.utils.optim_setup.logger")
     def test_warns_on_unused_keep_pattern(self, mock_logger):
         """Should warn when keep pattern matches nothing."""
         list(
@@ -367,7 +371,7 @@ class TestUnusedPatternWarnings(unittest.TestCase):
 
         mock_logger.warning.assert_called()
         warning_call = mock_logger.warning.call_args[0][0]
-        self.assertIn("Keep patterns matched NOTHING", warning_call)
+        self.assertIn("Keep patterns matched nothing", warning_call)
 
 
 class TestPrintParamNames(unittest.TestCase):
@@ -399,7 +403,7 @@ class TestParameterCounts(unittest.TestCase):
     def setUp(self):
         self.model = SimpleModel()
 
-    @patch("flagscale.train.utils.optim_utils.logger")
+    @patch("flagscale.train.utils.optim_setup.logger")
     def test_parameter_count_logging(self, mock_logger):
         """Verify correct parameter counts are logged."""
         # Count total params
@@ -424,3 +428,310 @@ class TestParameterCounts(unittest.TestCase):
         info_call = mock_logger.info.call_args[0][0]
         self.assertIn(f"trainable={total_params - encoder_params:,}", info_call)
         self.assertIn(f"frozen={encoder_params:,}", info_call)
+
+
+class TestBuildOptimParamGroups(unittest.TestCase):
+    """Test build_optim_param_groups function (NeMo-style per-module config)."""
+
+    def setUp(self):
+        self.model = SimpleModel()
+
+    def test_none_config_returns_single_group(self):
+        """With None config, should return single group with all params."""
+        param_groups = build_optim_param_groups(self.model, None)
+
+        self.assertEqual(len(param_groups), 1)
+        all_params = list(self.model.parameters())
+        self.assertEqual(len(param_groups[0]["params"]), len(all_params))
+
+    def test_single_module_config(self):
+        """Test with config for single module."""
+        config = {"encoder": {"lr": 1e-5}}
+        param_groups = build_optim_param_groups(self.model, config)
+
+        # Should have 2 groups: default + encoder
+        self.assertEqual(len(param_groups), 2)
+
+        # Find encoder group
+        encoder_group = next(g for g in param_groups if g.get("name") == "encoder")
+        self.assertEqual(encoder_group["lr"], 1e-5)
+
+        # Encoder params count
+        encoder_param_count = sum(
+            1 for name, _ in self.model.named_parameters() if name.startswith("encoder")
+        )
+        self.assertEqual(len(encoder_group["params"]), encoder_param_count)
+
+    def test_multiple_module_config(self):
+        """Test with config for multiple modules."""
+        config = {
+            "encoder": {"lr": 1e-5, "weight_decay": 0.01},
+            "decoder": {"lr": 2e-5},
+        }
+        param_groups = build_optim_param_groups(self.model, config)
+
+        # Should have 3 groups: default + encoder + decoder
+        self.assertEqual(len(param_groups), 3)
+
+        encoder_group = next(g for g in param_groups if g.get("name") == "encoder")
+        decoder_group = next(g for g in param_groups if g.get("name") == "decoder")
+
+        self.assertEqual(encoder_group["lr"], 1e-5)
+        self.assertEqual(encoder_group["weight_decay"], 0.01)
+        self.assertEqual(decoder_group["lr"], 2e-5)
+
+    def test_default_group_contains_remaining_params(self):
+        """Default group should contain params not in other groups."""
+        config = {"encoder": {"lr": 1e-5}}
+        param_groups = build_optim_param_groups(self.model, config)
+
+        default_group = next(g for g in param_groups if g.get("name") == "default")
+
+        # Default should contain decoder + head params
+        non_encoder_count = sum(
+            1 for name, _ in self.model.named_parameters() if not name.startswith("encoder")
+        )
+        self.assertEqual(len(default_group["params"]), non_encoder_count)
+
+    def test_respects_requires_grad(self):
+        """Should only include trainable params."""
+        # Freeze encoder
+        for name, param in self.model.named_parameters():
+            if name.startswith("encoder"):
+                param.requires_grad = False
+
+        config = {"encoder": {"lr": 1e-5}}
+        param_groups = build_optim_param_groups(self.model, config)
+
+        # Encoder group should be empty (no trainable params)
+        encoder_groups = [g for g in param_groups if g.get("name") == "encoder"]
+        # Either no encoder group, or encoder group has no params
+        if encoder_groups:
+            self.assertEqual(len(encoder_groups[0]["params"]), 0)
+
+    @patch("flagscale.train.utils.optim_setup.logger")
+    def test_warns_on_nonexistent_module(self, mock_logger):
+        """Should warn when module doesn't exist."""
+        config = {"nonexistent": {"lr": 1e-5}}
+        build_optim_param_groups(self.model, config)
+
+        mock_logger.warning.assert_called()
+        warning_call = mock_logger.warning.call_args[0][0]
+        self.assertIn("nonexistent", warning_call)
+
+
+class TestBuildOptimParamGroupsNested(unittest.TestCase):
+    """Test build_optim_param_groups with nested model structure."""
+
+    def setUp(self):
+        self.model = NestedModel()
+
+    def test_nested_module_path(self):
+        """Test accessing nested modules via dot path."""
+        config = {"vlm.visual": {"lr": 1e-5}}
+        param_groups = build_optim_param_groups(self.model, config)
+
+        visual_group = next(g for g in param_groups if g.get("name") == "vlm.visual")
+        self.assertEqual(visual_group["lr"], 1e-5)
+
+        # Count visual params
+        visual_param_count = sum(
+            1 for name, _ in self.model.named_parameters() if name.startswith("vlm.visual")
+        )
+        self.assertEqual(len(visual_group["params"]), visual_param_count)
+
+    def test_multiple_nested_paths(self):
+        """Test multiple nested module configs."""
+        config = {
+            "vlm.visual": {"lr": 1e-5},
+            "vlm.language": {"lr": 2e-5},
+            "action_model": {"lr": 1e-4},
+        }
+        param_groups = build_optim_param_groups(self.model, config)
+
+        # 3 configured groups + default (though default may be empty)
+        groups_with_params = [g for g in param_groups if len(g["params"]) > 0]
+        self.assertGreaterEqual(len(groups_with_params), 3)
+
+
+class TestSetupScheduler(unittest.TestCase):
+    """Test setup_scheduler function."""
+
+    def setUp(self):
+        self.model = SimpleModel()
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=1e-4)
+
+    def test_cosine_scheduler(self):
+        """Test creating a cosine scheduler."""
+        scheduler_config = MagicMock()
+        scheduler_config.name = "cosine"
+        scheduler_config.warmup_steps = 100
+        scheduler_config.scheduler_kwargs = None
+
+        scheduler = setup_scheduler(self.optimizer, scheduler_config, num_training_steps=1000)
+
+        self.assertIsNotNone(scheduler)
+        self.assertTrue(hasattr(scheduler, "step"))
+
+    def test_linear_scheduler(self):
+        """Test creating a linear scheduler."""
+        scheduler_config = MagicMock()
+        scheduler_config.name = "linear"
+        scheduler_config.warmup_steps = 50
+        scheduler_config.scheduler_kwargs = None
+
+        scheduler = setup_scheduler(self.optimizer, scheduler_config, num_training_steps=500)
+
+        self.assertIsNotNone(scheduler)
+
+    def test_constant_with_warmup_scheduler(self):
+        """Test creating a constant_with_warmup scheduler."""
+        scheduler_config = MagicMock()
+        scheduler_config.name = "constant_with_warmup"
+        scheduler_config.warmup_steps = 100
+        scheduler_config.scheduler_kwargs = None
+
+        scheduler = setup_scheduler(self.optimizer, scheduler_config, num_training_steps=1000)
+
+        self.assertIsNotNone(scheduler)
+
+    def test_cosine_with_min_lr(self):
+        """Test creating a cosine scheduler with min_lr."""
+        scheduler_config = MagicMock()
+        scheduler_config.name = "cosine_with_min_lr"
+        scheduler_config.warmup_steps = 100
+        scheduler_config.scheduler_kwargs = {"min_lr": 1e-6}
+
+        scheduler = setup_scheduler(self.optimizer, scheduler_config, num_training_steps=1000)
+
+        self.assertIsNotNone(scheduler)
+
+    def test_raises_error_when_name_is_none(self):
+        """Should raise ValueError when scheduler name is None."""
+        scheduler_config = MagicMock()
+        scheduler_config.name = None
+        scheduler_config.warmup_steps = 100
+        scheduler_config.scheduler_kwargs = None
+
+        with self.assertRaises(ValueError) as context:
+            setup_scheduler(self.optimizer, scheduler_config, num_training_steps=1000)
+
+        self.assertIn("name must be specified", str(context.exception))
+
+    def test_scheduler_step_updates_lr(self):
+        """Test that scheduler step updates learning rate."""
+        scheduler_config = MagicMock()
+        scheduler_config.name = "linear"
+        scheduler_config.warmup_steps = 10
+        scheduler_config.scheduler_kwargs = None
+
+        scheduler = setup_scheduler(self.optimizer, scheduler_config, num_training_steps=100)
+
+        initial_lr = self.optimizer.param_groups[0]["lr"]
+        for _ in range(50):
+            scheduler.step()
+        final_lr = self.optimizer.param_groups[0]["lr"]
+
+        self.assertNotEqual(initial_lr, final_lr)
+
+    def test_warmup_phase(self):
+        """Test that warmup phase increases lr."""
+        scheduler_config = MagicMock()
+        scheduler_config.name = "linear"
+        scheduler_config.warmup_steps = 100
+        scheduler_config.scheduler_kwargs = None
+
+        scheduler = setup_scheduler(self.optimizer, scheduler_config, num_training_steps=1000)
+
+        lrs = []
+        for _ in range(50):
+            lrs.append(self.optimizer.param_groups[0]["lr"])
+            scheduler.step()
+
+        # During warmup, LR should generally increase
+        self.assertLess(lrs[0], lrs[-1])
+
+
+class TestSetupOptimizerAndScheduler(unittest.TestCase):
+    """Test setup_optimizer_and_scheduler function."""
+
+    def setUp(self):
+        self.model = SimpleModel()
+
+    def _make_train_config(self, freeze_patterns=None, keep_patterns=None):
+        """Helper to create a mock TrainConfig."""
+        train_config = MagicMock()
+        # System config
+        train_config.system = MagicMock()
+        train_config.system.optimizer = MagicMock()
+        train_config.system.optimizer.name = "AdamW"
+        train_config.system.optimizer.lr = 1e-4
+        train_config.system.optimizer.param_groups = None
+        train_config.system.optimizer.get_optimizer_kwargs.return_value = {"lr": 1e-4}
+        train_config.system.scheduler = MagicMock()
+        train_config.system.scheduler.name = "cosine"
+        train_config.system.scheduler.warmup_steps = 100
+        train_config.system.scheduler.scheduler_kwargs = None
+        train_config.system.train_steps = 1000
+        # Model config with freeze
+        train_config.model = MagicMock()
+        if freeze_patterns is not None:
+            train_config.model.freeze = MagicMock()
+            train_config.model.freeze.freeze_patterns = freeze_patterns
+            train_config.model.freeze.keep_patterns = keep_patterns
+        else:
+            train_config.model.freeze = None
+        return train_config
+
+    def test_returns_optimizer_and_scheduler(self):
+        """Test that function returns both optimizer and scheduler."""
+        train_config = self._make_train_config()
+
+        optimizer, scheduler = setup_optimizer_and_scheduler(self.model, train_config)
+
+        self.assertIsInstance(optimizer, torch.optim.AdamW)
+        self.assertIsNotNone(scheduler)
+        self.assertTrue(hasattr(scheduler, "step"))
+
+    def test_with_freeze_config(self):
+        """Test with freeze config applied."""
+        train_config = self._make_train_config(freeze_patterns=["encoder\\..*"])
+        train_config.system.scheduler.name = "linear"
+        train_config.system.scheduler.warmup_steps = 50
+        train_config.system.train_steps = 500
+
+        optimizer, scheduler = setup_optimizer_and_scheduler(self.model, train_config)
+
+        # Encoder should be frozen
+        for name, param in self.model.named_parameters():
+            if name.startswith("encoder"):
+                self.assertFalse(param.requires_grad)
+            else:
+                self.assertTrue(param.requires_grad)
+
+        self.assertIsInstance(optimizer, torch.optim.AdamW)
+        self.assertIsNotNone(scheduler)
+
+    def test_scheduler_uses_train_steps(self):
+        """Test that scheduler uses train_steps from TrainConfig."""
+        train_config = self._make_train_config()
+        train_config.system.scheduler.name = "linear"
+        train_config.system.scheduler.warmup_steps = 10
+        train_config.system.train_steps = 100
+
+        optimizer, scheduler = setup_optimizer_and_scheduler(self.model, train_config)
+
+        # Step through warmup first
+        for _ in range(15):
+            optimizer.step()
+            scheduler.step()
+        peak_lr = optimizer.param_groups[0]["lr"]
+
+        # Step through decay phase
+        for _ in range(80):
+            optimizer.step()
+            scheduler.step()
+        final_lr = optimizer.param_groups[0]["lr"]
+
+        # After decay, LR should be less than peak
+        self.assertLess(final_lr, peak_lr)

@@ -5,7 +5,7 @@ Training configuration models using Pydantic.
 from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class FreezeConfig(BaseModel):
@@ -29,19 +29,92 @@ class FreezeConfig(BaseModel):
 
 
 class OptimizerConfig(BaseModel):
-    """Optimizer configuration"""
+    """Optimizer configuration.
+
+    Attributes:
+        name: Optimizer class name. Currently supported: "AdamW".
+        lr: Learning rate (default for all param groups).
+        betas: Adam beta coefficients (beta1, beta2).
+        eps: Adam epsilon for numerical stability.
+        weight_decay: Weight decay (L2 penalty).
+        param_groups: Per-module optimizer overrides. Maps module paths to optimizer kwargs.
+            Example: {"encoder": {"lr": 1e-5}, "decoder": {"lr": 1e-3}}
+
+    Example config (YAML):
+        optimizer:
+          name: AdamW
+          lr: 1e-4
+          weight_decay: 0.01
+          param_groups:
+            vision_encoder:
+              lr: 1e-5
+            action_head:
+              lr: 2e-4
+    """
 
     name: str = "AdamW"
-    lr: float = 2.5e-5
-    betas: tuple[float, float] = (0.9, 0.95)
-    eps: float = 1e-8
-    weight_decay: float = 0.01
+    lr: float | None = None
+    betas: tuple[float, float] | None = None
+    eps: float | None = None
+    weight_decay: float | None = None
+    param_groups: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description="Per-module optimizer settings. Maps module paths to optimizer kwargs.",
+    )
+
+    @field_validator("betas", mode="before")
+    @classmethod
+    def normalize_betas(cls, v):
+        """Convert list to tuple for betas if provided.
+
+        Accepts both list and tuple inputs, but always stores as tuple.
+        """
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return tuple(v)
+        return v
+
+    def get_optimizer_kwargs(self) -> dict[str, Any]:
+        """Get non-None optimizer kwargs for passing to optimizer.
+
+        Returns:
+            Dict of optimizer kwargs, excluding None values.
+        """
+        return {
+            k: v
+            for k, v in {
+                "lr": self.lr,
+                "betas": self.betas,
+                "eps": self.eps,
+                "weight_decay": self.weight_decay,
+            }.items()
+            if v is not None
+        }
 
 
 class SchedulerConfig(BaseModel):
-    """Learning rate scheduler configuration"""
+    """Learning rate scheduler configuration.
 
+    Uses transformers scheduler types when `name` is set. See transformers.SchedulerType for options:
+    linear, cosine, cosine_with_restarts, polynomial, constant,
+    constant_with_warmup, inverse_sqrt, cosine_with_min_lr, etc.
+
+    Example:
+        scheduler:
+          name: cosine
+          warmup_steps: 1000
+          scheduler_kwargs:
+            min_lr: 1e-6
+
+    For backward compatibility with pi0/pi0.5, the legacy fields (decay_steps, decay_lr) are kept.
+    """
+
+    name: str | None = None
     warmup_steps: int = 1000
+    scheduler_kwargs: dict[str, Any] | None = None
+
+    # Legacy fields for pi0/pi0.5 backward compatibility
     decay_steps: int = 30000
     decay_lr: float = 2.5e-6
 
