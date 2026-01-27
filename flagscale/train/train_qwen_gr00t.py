@@ -69,13 +69,13 @@ def set_seed(seed: int):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    # torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.enabled = True
     # torch.backends.cudnn.benchmark = True
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = False
-    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = True
 
 
 def init_ddp():
@@ -400,6 +400,8 @@ def make_preprocessor_from_config(
     # Determine format and extract step configs
     if isinstance(config, (dict, DictConfig)) and "steps" in config:
         # JSON format: {"name": "...", "steps": [...]}
+        if isinstance(config, DictConfig):
+            config = OmegaConf.to_container(config, resolve=True)
         step_configs = config["steps"]
         pipeline_name = config.get("name", "policy_preprocessor")
     elif isinstance(config, list):
@@ -420,11 +422,15 @@ def make_preprocessor_from_config(
         elif isinstance(step_entry, (dict, DictConfig)):
             if "registry_name" in step_entry:
                 # JSON format: {"registry_name": "...", "config": {...}}
+                if isinstance(step_entry, DictConfig):
+                    step_entry = OmegaConf.to_container(step_entry, resolve=True)
                 step_dict = step_entry
             elif len(step_entry) == 1:
                 # Concise format: {"step_name": {...}}
                 step_name = next(iter(step_entry.keys()))
                 step_config = step_entry[step_name]
+                if isinstance(step_config, DictConfig):
+                    step_config = OmegaConf.to_container(step_config, resolve=True)
                 step_dict = {"registry_name": step_name, "config": step_config}
             else:
                 raise ValueError(
@@ -767,6 +773,8 @@ def main(config: TrainConfig, seed: int):
                 save_checkpoint(
                     checkpoint_dir=checkpoint_dir,
                     policy=policy_to_save,
+                    config=config,
+                    preprocessor=preprocessor,
                 )
                 update_last_checkpoint(checkpoint_dir)
 
@@ -805,6 +813,11 @@ if __name__ == "__main__":
     logger.info("=" * 100)
     logger.info(f"Experiment: {experiment_config}")
     logger.info(f"Train config: {train_config}")
+
+    # import debugpy
+    # debugpy.listen(("0.0.0.0", 9096))
+    # debugpy.wait_for_client()
+    # debugpy.breakpoint()
 
     # Run training with both configs
     main(train_config, seed)

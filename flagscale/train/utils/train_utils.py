@@ -17,18 +17,13 @@
 # limitations under the License.
 from pathlib import Path
 
-# from lerobot.configs.train import TrainPipelineConfig
-from flagscale.models.pi0.modeling_pi0 import PI0Policy
+from omegaconf import OmegaConf
+from safetensors.torch import load_file, save_model
 
-# from lerobot.optim.optimizers import load_optimizer_state, save_optimizer_state
-# from lerobot.optim.schedulers import load_scheduler_state, save_scheduler_state
-# from lerobot.policies.pretrained import PreTrainedPolicy
-# from lerobot.processor import PolicyProcessorPipeline
 from flagscale.models.utils.constants import (
     CHECKPOINTS_DIR,
     LAST_CHECKPOINT_LINK,
     PRETRAINED_MODEL_DIR,
-    # TRAINING_STATE_DIR,
     TRAINING_STEP,
 )
 from flagscale.train.datasets.utils import load_json, write_json
@@ -66,46 +61,96 @@ def update_last_checkpoint(checkpoint_dir: Path) -> Path:
 
 def save_checkpoint(
     checkpoint_dir: Path,
-    # step: int,
-    # cfg: PI0Config,
-    policy: PI0Policy,
-    # optimizer: Optimizer,
-    # scheduler: LRScheduler | None = None,
-    # preprocessor: PolicyProcessorPipeline | None = None,
-    # postprocessor: PolicyProcessorPipeline | None = None,
+    policy,
+    config,
+    preprocessor=None,
 ) -> None:
-    """This function creates the following directory structure:
+    """Save model weights, config, and preprocessor state.
 
-    005000/  #  training step at checkpoint
-    ├── pretrained_model/
-    │   ├── config.json  # policy config
-    │   ├── model.safetensors  # policy weights
-    │   ├── train_config.json  # train config
-    │   ├── processor.json  # processor config (if preprocessor provided)
-    │   └── step_*.safetensors  # processor state files (if any)
-    └── training_state/
-        ├── optimizer_param_groups.json  #  optimizer param groups
-        ├── optimizer_state.safetensors  # optimizer state
-        ├── rng_state.safetensors  # rng states
-        ├── scheduler_state.json  # scheduler state
-        └── training_step.json  # training step
+    Creates the following directory structure:
+        005000/
+        └── pretrained_model/
+            ├── train_config.yaml              # train config (OmegaConf)
+            ├── model.safetensors              # All weights (VLM + action head)
+            ├── policy_preprocessor.json       # Preprocessor pipeline config
+            └── policy_preprocessor_step_*.safetensors  # Norm stats
 
     Args:
-        cfg (TrainPipelineConfig): The training config used for this run.
-        step (int): The training step at that checkpoint.
-        policy (PreTrainedPolicy): The policy to save.
-        optimizer (Optimizer | None, optional): The optimizer to save the state from. Defaults to None.
-        scheduler (LRScheduler | None, optional): The scheduler to save the state from. Defaults to None.
-        preprocessor: The preprocessor/pipeline to save. Defaults to None.
+        checkpoint_dir: Directory to save checkpoint (e.g., checkpoints/005000)
+        policy: The model
+        config: Training config (OmegaConf, Pydantic, or dict)
+        preprocessor: Optional PolicyProcessorPipeline
     """
     pretrained_dir = checkpoint_dir / PRETRAINED_MODEL_DIR
-    policy.save_pretrained(pretrained_dir)
-    # cfg.save_pretrained(pretrained_dir)
-    # if preprocessor is not None:
-    #     preprocessor.save_pretrained(pretrained_dir)
-    # if postprocessor is not None:
-    #     postprocessor.save_pretrained(pretrained_dir)
-    # save_training_state(checkpoint_dir, step, optimizer, scheduler)
+    pretrained_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save train config as YAML
+    # Handle OmegaConf, Pydantic, and dict configs
+    if hasattr(config, "model_dump"):
+        config = OmegaConf.create(config.model_dump())
+    elif not OmegaConf.is_config(config):
+        config = OmegaConf.create(config)
+    OmegaConf.save(config, pretrained_dir / "train_config.yaml")
+
+    # Save model weights (save_model handles shared tensors like tied embeddings)
+    save_model(policy, pretrained_dir / "model.safetensors")
+
+    if preprocessor is not None:
+        preprocessor.save_pretrained(pretrained_dir)
+
+
+def load_checkpoint(
+    checkpoint_dir: Path,
+    model_cls=None,
+    device: str = "cpu",
+):
+    """Load config, model weights, and preprocessor from checkpoint.
+
+    Args:
+        checkpoint_dir: Checkpoint directory (e.g., checkpoints/005000)
+        model_cls: Optional model class. If provided, instantiates model and loads weights.
+        device: Device to load weights to
+
+    Returns:
+        If model_cls provided: tuple of (model, preprocessor)
+        If model_cls is None: tuple of (config, state_dict, preprocessor)
+
+    Raises:
+        FileNotFoundError: If checkpoint directory or required files don't exist
+    """
+    from flagscale.train.processor import PolicyProcessorPipeline
+
+    pretrained_dir = checkpoint_dir / PRETRAINED_MODEL_DIR
+
+    if not pretrained_dir.is_dir():
+        raise FileNotFoundError(f"Checkpoint directory not found: {pretrained_dir}")
+
+    config_path = pretrained_dir / "train_config.yaml"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    config = OmegaConf.load(config_path)
+
+    weights_path = pretrained_dir / "model.safetensors"
+    if not weights_path.exists():
+        raise FileNotFoundError(f"Weights file not found: {weights_path}")
+    state_dict = load_file(weights_path, device=device)
+
+    preprocessor = None
+    preprocessor_config_path = pretrained_dir / "policy_preprocessor.json"
+    if preprocessor_config_path.exists():
+        preprocessor = PolicyProcessorPipeline.from_pretrained(
+            pretrained_dir,
+            config_filename="policy_preprocessor.json",
+        )
+
+    if model_cls is not None:
+        model = model_cls(config)
+        # TODO: (yupu) Some modules could be loaded twice
+        model.load_state_dict(state_dict)
+        model.to(device)
+        return model, preprocessor
+    else:
+        return config, state_dict, preprocessor
 
 
 # def save_training_state(
