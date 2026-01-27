@@ -18,7 +18,7 @@
 from pathlib import Path
 
 from omegaconf import OmegaConf
-from safetensors.torch import load_file, save_model
+from safetensors.torch import load_model, save_model
 
 from flagscale.models.utils.constants import (
     CHECKPOINTS_DIR,
@@ -100,15 +100,15 @@ def save_checkpoint(
 
 
 def load_checkpoint(
-    checkpoint_dir: Path,
-    model_cls=None,
+    checkpoint_dir: str | Path,
+    model_cls,
     device: str = "cpu",
 ):
     """Load config, model weights, and preprocessor from checkpoint.
 
     Args:
         checkpoint_dir: Checkpoint directory (e.g., checkpoints/005000)
-        model_cls: Optional model class. If provided, instantiates model and loads weights.
+        model_cls: Model class.
         device: Device to load weights to
 
     Returns:
@@ -120,6 +120,11 @@ def load_checkpoint(
     """
     from flagscale.train.processor import PolicyProcessorPipeline
 
+    print(f"Loading checkpoint from {checkpoint_dir}")
+
+    if isinstance(checkpoint_dir, str):
+        checkpoint_dir = Path(checkpoint_dir)
+
     pretrained_dir = checkpoint_dir / PRETRAINED_MODEL_DIR
 
     if not pretrained_dir.is_dir():
@@ -130,10 +135,33 @@ def load_checkpoint(
         raise FileNotFoundError(f"Config file not found: {config_path}")
     config = OmegaConf.load(config_path)
 
+    model = model_cls(config)
+
     weights_path = pretrained_dir / "model.safetensors"
     if not weights_path.exists():
         raise FileNotFoundError(f"Weights file not found: {weights_path}")
-    state_dict = load_file(weights_path, device=device)
+    # TODO: (yupu) Some modules could be loaded twice
+    missing_keys, unexpected_keys = load_model(model, weights_path, device=device)
+    if missing_keys:
+        print(f"Warning: Missing keys when loading checkpoint: {len(missing_keys)} keys")
+        if len(missing_keys) <= 10:
+            for key in missing_keys:
+                print(f"  - {key}")
+        else:
+            for key in missing_keys[:10]:
+                print(f"  - {key}")
+            print(f"  ... and {len(missing_keys) - 10} more")
+    if unexpected_keys:
+        print(f"Warning: Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
+        if len(unexpected_keys) <= 10:
+            for key in unexpected_keys:
+                print(f"  - {key}")
+        else:
+            for key in unexpected_keys[:10]:
+                print(f"  - {key}")
+            print(f"  ... and {len(unexpected_keys) - 10} more")
+
+    model.to(device)
 
     preprocessor = None
     preprocessor_config_path = pretrained_dir / "policy_preprocessor.json"
@@ -143,14 +171,7 @@ def load_checkpoint(
             config_filename="policy_preprocessor.json",
         )
 
-    if model_cls is not None:
-        model = model_cls(config)
-        # TODO: (yupu) Some modules could be loaded twice
-        model.load_state_dict(state_dict)
-        model.to(device)
-        return model, preprocessor
-    else:
-        return config, state_dict, preprocessor
+    return model, preprocessor
 
 
 # def save_training_state(
