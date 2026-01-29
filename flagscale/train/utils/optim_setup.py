@@ -194,12 +194,17 @@ def build_optim_param_groups(
         try:
             module = model.get_submodule(module_name)
         except AttributeError:
-            logger.warning(f"Module '{module_name}' not found in model, skipping.")
+            # TODO: (yupu) logger can't print the current module name and line number
+            logger.warning(
+                f"build_optim_param_groups: Module '{module_name}' not found in model, skipping."
+            )
             continue
 
         params = [p for p in module.parameters() if p.requires_grad]
         if not params:
-            logger.warning(f"Module '{module_name}' has no trainable parameters.")
+            logger.warning(
+                f"build_optim_param_groups: Module '{module_name}' has no trainable parameters."
+            )
             continue
 
         used_param_ids.update(id(p) for p in params)

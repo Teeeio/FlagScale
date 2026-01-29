@@ -55,6 +55,7 @@ from flagscale.train.utils.train_utils import (
 )
 from flagscale.train.utils.optim_setup import setup_optimizer_and_scheduler
 from flagscale.models.qwen_gr00t.qwen_gr00t import QwenGR00T
+from flagscale.models.vla.qwen_gr00t import QwenGR00T_V2
 
 IMAGENET_STATS = {
     "mean": [[[0.485]], [[0.456]], [[0.406]]],  # (c,1,1)
@@ -304,7 +305,13 @@ def make_policy(
     # kwargs["pretrained_name_or_path"] = cfg.pretrained_path
     # policy = policy_cls.from_pretrained(cfg.pretrained_path, config=cfg)
 
-    policy = QwenGR00T(config=config)
+    # TODO: (yupu) This is a hack, we should find a better way to handle this. LeRobot does this in the policy config.
+    # The order of the images is defined in the dataset config.json
+    image_features = {key: ft for key, ft in input_features.items() if ft.type is FeatureType.VISUAL}
+    config.data.vla_data.image_features = image_features
+
+    # policy = QwenGR00T(config=config)
+    policy = QwenGR00T_V2(config=config)
     print(policy)
     print(f"config: {config}")
 
@@ -564,6 +571,7 @@ def update_policy(
     autocast_context = (
         torch.amp.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
     )
+
     with autocast_context:
         loss = policy.forward(batch)
         loss.backward()

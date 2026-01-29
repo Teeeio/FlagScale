@@ -18,6 +18,7 @@ import torch
 from transformers import PretrainedConfig, PreTrainedModel
 
 from flagscale.models.action_model.gr00t_action_header import FlowmatchingActionHead
+from flagscale.models.utils.constants import ACTION, OBS_STATE
 
 # from flagscale.models.vlm.qwen2_5_vl import _QWen_VL_Interface
 from flagscale.models.vlm.qwen3_vl import _QWen3_VL_Interface
@@ -83,8 +84,8 @@ class QwenGR00T(PreTrainedModel):
         # instructions = [example["lang"] for example in examples]  # [B, str]
         # actions = [example["action"] for example in examples]  # label [B， len, 7]
 
-        actions = examples["action"]
-        state = None
+        actions = examples[ACTION]
+        state = examples[OBS_STATE]
 
         # state = (
         #     [example["state"] for example in examples] if "state" in examples[0] else None
@@ -93,7 +94,7 @@ class QwenGR00T(PreTrainedModel):
         # Step 1: QWenVL input format
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(
             examples=examples,
-            image_keys=["observation.images.image", "observation.images.wrist_image"],
+            image_keys=self.config.data.vla_data.image_features,
             # images=batch_images, instructions=instructions
         )
 
@@ -137,9 +138,7 @@ class QwenGR00T(PreTrainedModel):
 
             state_repeated = None
             if state is not None:
-                state = torch.tensor(
-                    np.array(state), device=last_hidden.device, dtype=last_hidden.dtype
-                )
+                state = state.to(device=last_hidden.device, dtype=last_hidden.dtype)
                 state_repeated = state.repeat(repeated_diffusion_steps, 1, 1)
 
             action_loss = self.action_model(
