@@ -295,6 +295,7 @@ class FlowmatchingActionHead(nn.Module):
 
         # Embed noised action trajectory.
         noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
+
         t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
         t = t[:, None, None]  # shape (B,1,1) for broadcast
 

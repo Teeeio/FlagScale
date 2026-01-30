@@ -60,6 +60,7 @@ class QwenGR00T_V2(PreTrainedModel):
         state = examples[OBS_STATE]
 
         # Step 1: QWenVL input format
+        # NOTE: (yupu) The order of the images differs from starVLA, which is [image, wrist_image]
         qwen_inputs = self.vlm.prepare_input(examples)
 
         # TODO: (yupu) Hard-coded autocast and dtype, matches starVLA
