@@ -54,8 +54,8 @@ from flagscale.train.utils.train_utils import (
     update_last_checkpoint,
 )
 from flagscale.train.utils.optim_setup import setup_optimizer_and_scheduler
-from flagscale.models.qwen_gr00t.qwen_gr00t import QwenGR00T
-from flagscale.models.vla.qwen_gr00t import QwenGR00T_V2
+from flagscale.models.vla.qwen_gr00t import QwenGr00t
+from flagscale.models.qwen_pi.qwen_pi import Qwen_PI
 
 IMAGENET_STATS = {
     "mean": [[[0.485]], [[0.456]], [[0.406]]],  # (c,1,1)
@@ -74,6 +74,7 @@ def set_seed(seed: int):
     # torch.backends.cudnn.benchmark = True
     # torch.backends.cudnn.deterministic = True
     # torch.backends.cuda.matmul.allow_tf32 = True
+
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = False
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -113,16 +114,47 @@ def make_dataset(cfg: DataConfig):
     # TODO: (yupu) Support image transforms
     enable_image_transform = False
     # TODO: (yupu) Remove hard-coded video backend
-    video_backend = "torchcodec"
+    # video_backend = "torchcodec"
+    # video_backend = "torchvision_av"
+    video_backend = "pyav"
 
     # image_transforms = ImageTransforms(cfg.image_transforms) if enable_image_transform else None
 
-    # TODO: (yupu) Remove hard-coded image transforms
-    from torchvision import transforms
-    image_transforms = transforms.Compose([
-        transforms.Resize((224, 224)),
-        # transforms.ToPILImage(),
-    ])
+    # Match starVLA: resize uint8 via PIL, then normalize to [0,1]
+    def _resize_like_starvla(frames: torch.Tensor) -> torch.Tensor:
+        if not isinstance(frames, torch.Tensor):
+            return frames
+        is_single = False
+        if frames.dim() == 3:
+            frames = frames.unsqueeze(0)
+            is_single = True
+        if frames.dim() != 4:
+            return frames
+        from PIL import Image
+        import numpy as np
+
+        resized_frames = []
+        for frame in frames:
+            channel_last = frame.shape[-1] in (1, 3, 4)
+            if channel_last:
+                frame_hwc = frame
+            elif frame.shape[0] in (1, 3, 4):
+                frame_hwc = frame.permute(1, 2, 0)
+            else:
+                frame_hwc = frame
+                channel_last = True
+            frame_uint8 = (frame_hwc * 255).round().clamp(0, 255).to(torch.uint8)
+            pil = Image.fromarray(frame_uint8.cpu().numpy()).resize(
+                (224, 224), resample=Image.BILINEAR
+            )
+            out = torch.from_numpy(np.array(pil)).to(frames.device).float() / 255.0
+            if not channel_last:
+                out = out.permute(2, 0, 1)
+            resized_frames.append(out)
+        output = torch.stack(resized_frames, dim=0)
+        return output[0] if is_single else output
+
+    image_transforms = _resize_like_starvla
     # Leave the revision to None
     ds_meta = LeRobotDatasetMetadata(root=cfg.data_path, revision=None)
     delta_timestamps = resolve_delta_timestamps(cfg, ds_meta)
@@ -310,8 +342,8 @@ def make_policy(
     image_features = {key: ft for key, ft in input_features.items() if ft.type is FeatureType.VISUAL}
     config.data.vla_data.image_features = image_features
 
-    # policy = QwenGR00T(config=config)
-    policy = QwenGR00T_V2(config=config)
+    policy = QwenGr00t(config=config)
+    # policy = Qwen_PI(config=config)
     print(policy)
     print(f"config: {config}")
 
@@ -651,7 +683,7 @@ def main(config: TrainConfig, seed: int):
         # "tokenizer_processor": {"tokenizer_name": config.model.tokenizer_path},
     }
 
-    num_workers = config.system.num_workers
+    num_workers = 0 # config.system.num_workers
     shuffle = config.system.shuffle
 
     # DistributedSampler ensures each rank gets different data
@@ -730,6 +762,9 @@ def main(config: TrainConfig, seed: int):
             k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
             for k, v in batch.items()
         }
+
+        torch.save(batch, "batch_resized.pt")
+        # assert 0
 
         if preprocessor is not None:
             batch = preprocessor(batch)

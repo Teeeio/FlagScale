@@ -8,7 +8,7 @@ from flagscale.models.utils.constants import ACTION, OBS_STATE
 
 class TestQwenGR00TParity(unittest.TestCase):
     """
-    End-to-end parity test between QwenGR00T and QwenGR00T_V2.
+    End-to-end parity test between QwenGR00T and QwenGr00t.
 
     Note: This test requires GPU and the actual model weights.
     Skip in CI environments without GPU.
@@ -16,16 +16,17 @@ class TestQwenGR00TParity(unittest.TestCase):
 
     @unittest.skipIf(not torch.cuda.is_available(), "No GPU available")
     def test_forward_parity(self):
-        """Test that QwenGR00T_V2 produces same loss as QwenGR00T."""
-        from flagscale.models.qwen_gr00t.qwen_gr00t import QwenGR00T
-        from flagscale.models.vla.qwen_gr00t import QwenGR00T_V2
+        """Test that QwenGr00t produces same loss as QwenGR00T."""
+        from tests.unit_tests.models.vla.qwen_gr00t_ref import QwenGR00T
+
+        from flagscale.models.vla.qwen_gr00t import QwenGr00t
 
         # Create config
         config = self._create_test_config()
 
         # Create both models
         model_v1 = QwenGR00T(config=config).cuda()
-        model_v2 = QwenGR00T_V2(config=config).cuda()
+        model_v2 = QwenGr00t(config=config).cuda()
 
         # Copy action model weights from v1 to v2
         model_v2.action_model._head.load_state_dict(model_v1.action_model.state_dict())

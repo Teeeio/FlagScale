@@ -17,14 +17,14 @@ import numpy as np
 import torch
 from transformers import PretrainedConfig, PreTrainedModel
 
-from flagscale.models.utils.constants import ACTION, OBS_STATE
+from flagscale.models.utils.constants import ACTION
 from flagscale.models.vla.registry import build_action_model, build_vlm
 from flagscale.train.train_config import TrainConfig
 from flagscale.train.utils.image_tools import to_pil_preserve
 from flagscale.train.utils.trainer_tools import resize_images
 
 
-class QwenGR00T_V2(PreTrainedModel):
+class QwenGr00t(PreTrainedModel):
     """
     Multimodal vision-language-action model.
 
@@ -57,11 +57,16 @@ class QwenGR00T_V2(PreTrainedModel):
     def forward(self, examples: dict, **kwargs):
         """ """
         actions = examples[ACTION]
-        state = examples[OBS_STATE]
+        state = None  # examples[OBS_STATE]
 
         # Step 1: QWenVL input format
         # NOTE: (yupu) The order of the images differs from starVLA, which is [image, wrist_image]
         qwen_inputs = self.vlm.prepare_input(examples)
+
+        # qwen_inputs = torch.load("/share/project/fengyupu/github/starVLA/qwen_inputs_debug.pt", weights_only=False)
+        # torch.testing.assert_close(qwen_inputs, qwen_inputs_debug)
+
+        torch.save(qwen_inputs, "qwen_inputs.pt")
 
         # TODO: (yupu) Hard-coded autocast and dtype, matches starVLA
         with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -96,7 +101,16 @@ class QwenGR00T_V2(PreTrainedModel):
             # Use action head forward API
             vlm_output_repeated = {"hidden_states": last_hidden_repeated}
             action_input = {"actions": actions_repeated, "state": state_repeated}
+
+            torch.save(vlm_output_repeated, "vlm_output_repeated.pt")
+            torch.save(action_input, "action_input.pt")
+
             output = self.action_model.forward(vlm_output_repeated, action_input)
+
+            torch.save(output, "output.pt")
+
+        print(f"output: {output}")
+        # assert False
 
         return output["loss"]
 

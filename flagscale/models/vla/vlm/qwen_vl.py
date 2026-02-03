@@ -216,7 +216,8 @@ class Qwen3VLBackbone(QwenVLBackbone):
 
     def prepare_input(self, batch: dict) -> dict[str, torch.Tensor]:
         # TODO: (yupu) This is a hack, we should find a better way to handle this.
-        image_keys = self._config.data.vla_data.image_features
+        image_keys = self._config.data.vla_data.image_features.keys()
+        image_keys = ["observation.images.image", "observation.images.wrist_image"]
         return self.build_qwenvl_inputs(examples=batch, image_keys=image_keys)
 
     # TODO: (yupu) Refactor this args
@@ -267,6 +268,11 @@ class Qwen3VLBackbone(QwenVLBackbone):
                 batch_images[idx] = [img for img in sample_images if img is not None]
 
             images = batch_images
+
+        import numpy as np
+
+        torch.save(np.array([np.array(img) for img in images[0]]), "raw_images.pt")
+        # assert False
 
         # Create messages: one message per sample
         messages = []
