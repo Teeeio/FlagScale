@@ -1088,6 +1088,15 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Add task as a string
         task_idx = item["task_index"].item()
         item["task"] = self.meta.tasks.iloc[task_idx].name
+
+        # DEBUG: print raw action from dataset
+        if "action" in item:
+            action_val = item["action"]
+            if hasattr(action_val, "numpy"):
+                action_val = action_val.numpy()
+            print(
+                f"[FS dataset] action[0,:5]: {action_val[0, :5].tolist() if len(action_val.shape) > 1 else action_val[:5].tolist()}"
+            )
         return item
 
     def __repr__(self):

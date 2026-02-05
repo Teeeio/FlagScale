@@ -17,7 +17,6 @@ import numpy as np
 import torch
 from transformers import PretrainedConfig, PreTrainedModel
 
-from flagscale.models.utils.constants import ACTION
 from flagscale.models.vla.registry import build_action_model, build_vlm
 from flagscale.train.train_config import TrainConfig
 from flagscale.train.utils.image_tools import to_pil_preserve
@@ -54,30 +53,55 @@ class QwenGr00t(PreTrainedModel):
 
         self.future_action_window_size = config.model.action_model.future_action_window_size
 
+        # DEBUG: Print action encoder weights to verify initialization matches starVLA
+        if hasattr(self.action_model, "_head") and hasattr(
+            self.action_model._head, "action_encoder"
+        ):
+            ae = self.action_model._head.action_encoder
+            print(
+                f"[DEBUG INIT] action_encoder.layer1.weight[:3,:5]: {ae.layer1.weight[:3, :5].tolist()}"
+            )
+            print(
+                f"[DEBUG INIT] action_encoder.layer1.weight sum: {ae.layer1.weight.sum().item():.6f}"
+            )
+
     def forward(self, examples: dict, **kwargs):
         """ """
-        actions = examples[ACTION]
+        actions = [example["action"] for example in examples]  # [B, T, action_dim]
+        # actions = examples[ACTION]
         state = None  # examples[OBS_STATE]
 
         # Step 1: QWenVL input format
         # NOTE: (yupu) The order of the images differs from starVLA, which is [image, wrist_image]
         qwen_inputs = self.vlm.prepare_input(examples)
 
+        # DEBUG: Print qwen_inputs stats
+        print(f"[DEBUG] qwen_inputs keys: {qwen_inputs.keys()}")
+        print(f"[DEBUG] input_ids shape: {qwen_inputs['input_ids'].shape}")
+        print(f"[DEBUG] input_ids sum: {qwen_inputs['input_ids'].sum().item()}")
+
         # qwen_inputs = torch.load("/share/project/fengyupu/github/starVLA/qwen_inputs_debug.pt", weights_only=False)
         # torch.testing.assert_close(qwen_inputs, qwen_inputs_debug)
 
-        torch.save(qwen_inputs, "qwen_inputs.pt")
+        # torch.save(qwen_inputs, "qwen_inputs.pt")
 
         # TODO: (yupu) Hard-coded autocast and dtype, matches starVLA
         with torch.autocast("cuda", dtype=torch.bfloat16):
             vlm_output = self.vlm.forward(qwen_inputs, output_attentions=False)
             # last_hidden_state: [B, seq_len, H]
             last_hidden = vlm_output["hidden_states"][-1]  # [B, L, H]
+            print(f"[DEBUG] last_hidden shape: {last_hidden.shape}, dtype: {last_hidden.dtype}")
+            print(
+                f"[DEBUG] last_hidden norm: {last_hidden.norm().item():.4f}, mean: {last_hidden.mean().item():.6f}, std: {last_hidden.std().item():.6f}"
+            )
 
         # Step 4: Action Expert Forward and Loss
         with torch.autocast("cuda", dtype=torch.float32):
             # TODO: (yupu) Is this a bug or a feature? The action dtype would stay as bf16 under this autocast.
-            actions = actions.to(device=last_hidden.device, dtype=last_hidden.dtype)
+            # actions = actions.to(device=last_hidden.device, dtype=last_hidden.dtype)
+            actions = torch.tensor(
+                np.array(actions), device=last_hidden.device, dtype=last_hidden.dtype
+            )  # [B, T_full, action_dim]
 
             # TODO: does not match RoboBrainX, need to check
             actions_target = actions[
@@ -90,8 +114,16 @@ class QwenGr00t(PreTrainedModel):
                 "repeated_diffusion_steps", 4
             )
 
+            print(f"[DEBUG] actions_target shape before repeat: {actions_target.shape}")
+            print(f"[DEBUG] actions_target sum: {actions_target.sum().item():.4f}")
+            print(f"[DEBUG] actions_target[0,0,:5]: {actions_target[0, 0, :5].tolist()}")
+            print(f"[DEBUG] repeated_diffusion_steps: {repeated_diffusion_steps}")
+
             actions_repeated = actions_target.repeat(repeated_diffusion_steps, 1, 1)
             last_hidden_repeated = last_hidden.repeat(repeated_diffusion_steps, 1, 1)
+
+            print(f"[DEBUG] actions_repeated shape: {actions_repeated.shape}")
+            print(f"[DEBUG] last_hidden_repeated shape: {last_hidden_repeated.shape}")
 
             state_repeated = None
             if state is not None:
@@ -102,12 +134,12 @@ class QwenGr00t(PreTrainedModel):
             vlm_output_repeated = {"hidden_states": last_hidden_repeated}
             action_input = {"actions": actions_repeated, "state": state_repeated}
 
-            torch.save(vlm_output_repeated, "vlm_output_repeated.pt")
-            torch.save(action_input, "action_input.pt")
+            # torch.save(vlm_output_repeated, "vlm_output_repeated.pt")
+            # torch.save(action_input, "action_input.pt")
 
             output = self.action_model.forward(vlm_output_repeated, action_input)
 
-            torch.save(output, "output.pt")
+            # torch.save(output, "output.pt")
 
         print(f"output: {output}")
         # assert False

@@ -62,6 +62,263 @@ IMAGENET_STATS = {
     "std": [[[0.229]], [[0.224]], [[0.225]]],  # (c,1,1)
 }
 
+from PIL import Image
+from torch.utils.data import Dataset as TorchDataset
+
+def collate_fn_starvla(batch):
+    """Simple collate function that returns batch as list of dicts (starVLA style)."""
+    return batch
+
+
+class StarVLAFormatDataset(TorchDataset):
+    """
+    Wrapper dataset that converts FlagScale tensor images to match starVLA format.
+
+    Conversion to match starVLA exactly:
+    1. FlagScale tensor: float32 CHW, [0,1] range
+    2. Convert to uint8 HWC: multiply by 255, permute, cast to uint8
+    3. PIL.fromarray + resize (same as starVLA)
+
+    starVLA format:
+        dict(
+            action=np.ndarray [T, action_dim],  # float16
+            image=[PIL.Image, ...],             # list of PIL images (224x224)
+            lang=str,                           # language instruction
+        )
+    """
+
+    def __init__(
+        self,
+        dataset: "LeRobotDataset",
+        image_keys: list[str] = None,
+        image_size: tuple[int, int] = (224, 224),
+    ):
+        self.dataset = dataset
+        self.image_keys = image_keys or [
+            "observation.images.image",
+            "observation.images.wrist_image",
+        ]
+        self.image_size = image_size
+
+        # Get action stats for min_max normalization (matching starVLA's StateActionTransform)
+        action_stats = dataset.meta.stats.get("action", {})
+        self.action_min = action_stats.get("min", None)
+        self.action_max = action_stats.get("max", None)
+        # Convert to numpy if needed
+        if self.action_min is not None and hasattr(self.action_min, 'numpy'):
+            self.action_min = self.action_min.numpy()
+        if self.action_max is not None and hasattr(self.action_max, 'numpy'):
+            self.action_max = self.action_max.numpy()
+
+        # Debug: print stats
+        print(f"[StarVLAFormatDataset] action_min: {self.action_min}")
+        print(f"[StarVLAFormatDataset] action_max: {self.action_max}")
+        self._debug_count = 0  # Counter for debug prints
+
+    def __len__(self):
+        return len(self.dataset)
+
+    @property
+    def num_frames(self):
+        return self.dataset.num_frames
+
+    @property
+    def num_episodes(self):
+        return self.dataset.num_episodes
+
+    def _tensor_to_pil_starvla(self, tensor: torch.Tensor) -> Image.Image:
+        """
+        Convert tensor to PIL exactly like starVLA:
+        1. tensor is float32 CHW [0,1] from torchcodec
+        2. Convert to uint8 HWC [0,255]
+        3. PIL.fromarray + resize
+        """
+        # Remove batch dim if present
+        if tensor.ndim == 4:
+            tensor = tensor[0]
+
+        # CHW -> HWC
+        if tensor.shape[0] in (1, 3, 4):
+            tensor = tensor.permute(1, 2, 0)
+
+        # float32 [0,1] -> uint8 [0,255]
+        img_np = (tensor.detach().cpu().numpy() * 255).astype(np.uint8)
+
+        # PIL.fromarray + resize (exactly like starVLA)
+        pil_img = Image.fromarray(img_np).resize(self.image_size)
+        return pil_img
+
+    def __getitem__(self, idx: int) -> dict:
+        item = self.dataset[idx]
+
+        # Convert images to PIL format (matching starVLA processing)
+        images = []
+        for key in self.image_keys:
+            if key in item:
+                pil_img = self._tensor_to_pil_starvla(item[key])
+                images.append(pil_img)
+
+        # Get action (convert to numpy float16 like starVLA)
+        action = item["action"]
+        if isinstance(action, torch.Tensor):
+            action = action.detach().cpu().numpy()
+
+        # Debug: print raw action values (only first few samples)
+        if self._debug_count < 16:
+            traj_id = item.get("episode_index", -1)
+            if isinstance(traj_id, torch.Tensor):
+                traj_id = traj_id.item()
+            frame_idx = item.get("index", idx)
+            if isinstance(frame_idx, torch.Tensor):
+                frame_idx = frame_idx.item()
+            print(f"[StarVLAFormatDataset] idx={idx} traj={traj_id} frame={frame_idx} RAW action[0,:5]: {action[0,:5].tolist()}")
+            print(f"[StarVLAFormatDataset] idx={idx} RAW action sum: {action.sum():.4f}")
+
+        # Apply min_max normalization (matching starVLA's Libero4in1DataConfig exactly)
+        # starVLA only normalizes action.x, y, z, roll, pitch, yaw (indices 0-5)
+        # action.gripper (index 6) is NOT normalized
+        # Formula: 2 * (x - min) / (max - min) - 1
+        if self.action_min is not None and self.action_max is not None:
+            # Only normalize first 6 dimensions (x, y, z, roll, pitch, yaw)
+            # Keep gripper (dim 6) as raw value
+            normalize_dims = 6  # Only normalize first 6 dims
+            action_range = self.action_max[:normalize_dims] - self.action_min[:normalize_dims]
+            mask = action_range > 1e-8
+
+            normalized = action.copy()
+            # Normalize dimensions 0-5 where range > 0
+            for i in range(normalize_dims):
+                if mask[i]:
+                    normalized[..., i] = (action[..., i] - self.action_min[i]) / action_range[i]
+                    normalized[..., i] = 2.0 * normalized[..., i] - 1.0
+                else:
+                    normalized[..., i] = 0.0
+            # Keep dimension 6 (gripper) as-is (no normalization)
+            action = normalized
+
+        # Debug: print normalized action values (only first few samples)
+        if self._debug_count < 16:
+            print(f"[StarVLAFormatDataset] idx={idx} NORM action[0,:5]: {action[0,:5].tolist()}")
+            print(f"[StarVLAFormatDataset] idx={idx} NORM action sum: {action.sum():.4f}")
+            self._debug_count += 1
+
+        action = action.astype(np.float16)
+
+        # Get language instruction
+        lang = item.get("task", "")
+        if isinstance(lang, torch.Tensor):
+            lang = lang.item() if lang.numel() == 1 else str(lang.tolist())
+
+        # Get trajectory_id and frame_index for debugging (matching starVLA format)
+        trajectory_id = item.get("episode_index", -1)
+        if isinstance(trajectory_id, torch.Tensor):
+            trajectory_id = trajectory_id.item()
+        frame_index = item.get("index", idx)
+        if isinstance(frame_index, torch.Tensor):
+            frame_index = frame_index.item()
+
+        return dict(
+            action=action,
+            image=images,
+            lang=lang,
+            trajectory_id=trajectory_id,
+            frame_index=frame_index,
+        )
+
+def register_debug_hooks(model_obj):
+    """
+    给模型挂载带有 Rank 信息的 Forward 和 Backward Hook
+    model_obj: 可以是 model (list) 也可以是 model[0] (module)
+    """
+    # 1. 获取 Rank 的辅助函数
+    def get_rank():
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_rank()
+        return 0
+    # 2. 通用打印函数
+    def calc_and_print(tensor, name, tag):
+        """
+        tensor: 要打印的张量
+        name: 模块名称 + 参数位置
+        tag: FWD 或 BWD
+        """
+        if tensor is None:
+            return
+        # 仅处理 Tensor，忽略 None 或其他类型
+        if isinstance(tensor, torch.Tensor):
+            # 获取当前 Rank
+            rank = get_rank()
+            # 计算 sum (转为 float32 防止溢出，item() 会触发同步确保数值准确)
+            # 注意：打印日志会显著降低训练速度，仅用于 Debug
+            val = torch.sum(tensor.detach().to(torch.float32)).item()
+            # 打印格式：[Rank 0][FWD] layers.0.self_attention sum: 1234.56
+            print(f"[Rank {rank}][{tag}] {name} sum: {val}", flush=True)
+    # 3. 前向 Hook 定义
+    def forward_wrapper(name):
+        def forward_hook(module, input, output):
+            # 打印 Input (元组或张量)
+            if isinstance(input, (list, tuple)):
+                for i, item in enumerate(input):
+                    calc_and_print(item, f"{name}.input[{i}]", "FWD")
+            else:
+                calc_and_print(input, f"{name}.input", "FWD")
+            # 打印 Output
+            if isinstance(output, (list, tuple)):
+                for i, item in enumerate(output):
+                    calc_and_print(item, f"{name}.output[{i}]", "FWD")
+            else:
+                calc_and_print(output, f"{name}.output", "FWD")
+        return forward_hook
+    # 4. 反向 Hook 定义 (使用 register_full_backward_hook)
+    def backward_wrapper(name):
+        def backward_hook(module, grad_input, grad_output):
+            # grad_output: 从上一层流回来的梯度 (反向传播的“输入”)
+            if isinstance(grad_output, (list, tuple)):
+                for i, g in enumerate(grad_output):
+                    calc_and_print(g, f"{name}.grad_output[{i}]", "BWD")
+            else:
+                calc_and_print(grad_output, f"{name}.grad_output", "BWD")
+            # grad_input: 当前层计算出的梯度 (准备传给下一层)
+            if isinstance(grad_input, (list, tuple)):
+                for i, g in enumerate(grad_input):
+                    calc_and_print(g, f"{name}.grad_input[{i}]", "BWD")
+            else:
+                calc_and_print(grad_input, f"{name}.grad_input", "BWD")
+        return backward_hook
+    # 5. 开始注册
+    # 兼容 list 结构
+    actual_module = model_obj[0] if isinstance(model_obj, list) else model_obj
+    print(f"Rank {get_rank()}: 开始挂载 Debug Hooks (仅叶子层)...", flush=True)
+    # 遍历所有子模块
+    for name, module in actual_module.named_modules():
+        # 【核心修改】跳过容器层，只Hook叶子层（没有子模块的层）
+        # 这样可以避免 Hook 顶层模块导致的 View 属性变化，同时也能覆盖所有计算
+        if len(list(module.children())) > 0:
+            continue
+        # 额外的黑名单（可选）：跳过一些不重要的层，比如 Dropout
+        if isinstance(module, torch.nn.Dropout):
+            continue
+        # 注册 FWD Hook
+        handle_fwd = module.register_forward_hook(forward_wrapper(name))
+        # 注册 BWD Hook
+        handle_bwd = module.register_full_backward_hook(backward_wrapper(name))
+def remove_debug_hooks_force(model_obj):
+    """
+    暴力清除模型中所有的 hook，不需要 handle。
+    """
+    actual_module = model_obj[0] if isinstance(model_obj, list) else model_obj
+    print("Force removing all hooks...", flush=True)
+    for module in actual_module.modules():
+        # 清除前向 hook
+        if hasattr(module, "_forward_hooks"):
+            module._forward_hooks.clear()
+        # 清除反向 hook
+        if hasattr(module, "_backward_hooks"):
+            module._backward_hooks.clear()
+    print("Hooks force removed.", flush=True)
+
+
+
 
 def set_seed(seed: int):
     np.random.seed(seed)
@@ -71,13 +328,13 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
     torch.backends.cudnn.enabled = True
-    # torch.backends.cudnn.benchmark = True
-    # torch.backends.cudnn.deterministic = True
-    # torch.backends.cuda.matmul.allow_tf32 = True
-
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = True
     torch.backends.cuda.matmul.allow_tf32 = True
+
+    # torch.backends.cudnn.benchmark = False
+    # torch.backends.cudnn.deterministic = False
+    # torch.backends.cuda.matmul.allow_tf32 = True
 
 
 def init_ddp():
@@ -593,7 +850,7 @@ def update_policy(
         - A dictionary of outputs from the policy's forward pass, for logging purposes.
     """
     start_time = time.perf_counter()
-    policy.train()
+    # policy.train()
 
     # Get the policy model (unwrap DDP if needed) to access config
     policy_model = policy.module if isinstance(policy, DDP) else policy
@@ -606,7 +863,7 @@ def update_policy(
 
     with autocast_context:
         loss = policy.forward(batch)
-        loss.backward()
+    loss.backward()
 
     # Clip gradients if specified
     if grad_clip_norm > 0:
@@ -660,7 +917,12 @@ def main(config: TrainConfig, seed: int):
 
     dist.barrier()
 
+    # Reset seed before model creation to match starVLA initialization order
+    # (starVLA creates model before dataset, so we reset seed to get same weights)
+    set_seed(seed)
+
     policy, input_features, output_features = make_policy(config=config, ds_meta=dataset.meta)
+    register_debug_hooks(policy)
 
     dist.barrier()
 
@@ -686,9 +948,21 @@ def main(config: TrainConfig, seed: int):
     num_workers = 0 # config.system.num_workers
     shuffle = config.system.shuffle
 
+    # Wrap dataset with StarVLAFormatDataset for starVLA-compatible output format
+    image_keys = getattr(config.data, "image_keys", None) or [
+        "observation.images.image",
+        "observation.images.wrist_image",
+    ]
+    starvla_dataset = StarVLAFormatDataset(
+        dataset,
+        image_keys=image_keys,
+        image_size=(224, 224),
+    )
+
     # DistributedSampler ensures each rank gets different data
     sampler = torch.utils.data.distributed.DistributedSampler(
-        dataset,
+        # dataset,
+        starvla_dataset,
         num_replicas=dist.get_world_size(),
         rank=dist.get_rank(),
         shuffle=shuffle,
@@ -696,7 +970,8 @@ def main(config: TrainConfig, seed: int):
     )
 
     dataloader = torch.utils.data.DataLoader(
-        dataset,
+        # dataset,
+        starvla_dataset,
         num_workers=num_workers,
         batch_size=config.system.batch_size,
         shuffle=False,  # Must be False when using sampler
@@ -704,6 +979,7 @@ def main(config: TrainConfig, seed: int):
         pin_memory=True,
         drop_last=False,
         prefetch_factor=2 if num_workers > 0 else None,
+        collate_fn=collate_fn_starvla,  # Return batch as list of dicts (starVLA style)
     )
 
     # Setup preprocessor
@@ -728,7 +1004,7 @@ def main(config: TrainConfig, seed: int):
 
     dl_iter = cycle(dataloader)
 
-    policy.train()
+    # policy.train()
 
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),
@@ -758,16 +1034,17 @@ def main(config: TrainConfig, seed: int):
     for _ in range(step, config.system.train_steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
-        batch = {
-            k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
+        # batch = {
+        #     k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+        #     for k, v in batch.items()
+        # }
+        # print(f"batch: {batch}")
 
-        torch.save(batch, "batch_resized.pt")
+        # torch.save(batch, "batch_resized.pt")
         # assert 0
 
-        if preprocessor is not None:
-            batch = preprocessor(batch)
+        # if preprocessor is not None:
+        #     batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
         # print(f"batch: {batch}")

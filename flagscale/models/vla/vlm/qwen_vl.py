@@ -53,12 +53,13 @@ class QwenVLBackbone(nn.Module):
         raise NotImplementedError
 
     def forward(self, batch: dict[str, torch.Tensor], **kwargs) -> dict[str, torch.Tensor]:
-        outputs = self.model(
-            **batch,
-            output_hidden_states=True,
-            return_dict=True,
-            **kwargs,
-        )
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            outputs = self.model(
+                **batch,
+                output_hidden_states=True,
+                return_dict=True,
+                **kwargs,
+            )
         return {"hidden_states": outputs.hidden_states}
 
 
@@ -216,9 +217,21 @@ class Qwen3VLBackbone(QwenVLBackbone):
 
     def prepare_input(self, batch: dict) -> dict[str, torch.Tensor]:
         # TODO: (yupu) This is a hack, we should find a better way to handle this.
-        image_keys = self._config.data.vla_data.image_features.keys()
-        image_keys = ["observation.images.image", "observation.images.wrist_image"]
-        return self.build_qwenvl_inputs(examples=batch, image_keys=image_keys)
+        # image_keys = self._config.data.vla_data.image_features.keys()
+        # image_keys = ["observation.images.image", "observation.images.wrist_image"]
+
+        # Extract data in starVLA format (list of dicts)
+        examples = batch
+        batch_images = [example["image"] for example in examples]  # [B, [PIL]]
+        instructions = [example["lang"] for example in examples]  # [B, str]
+        # actions = [example["action"] for example in examples]  # [B, T, action_dim]
+        # state = None
+
+        return self.build_qwenvl_inputs(
+            examples=None, images=batch_images, instructions=instructions
+        )
+
+        # return self.build_qwenvl_inputs(examples=batch, image_keys=image_keys)
 
     # TODO: (yupu) Refactor this args
     def build_qwenvl_inputs(
