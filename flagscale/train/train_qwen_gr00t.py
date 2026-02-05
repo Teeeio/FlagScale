@@ -371,9 +371,11 @@ def make_dataset(cfg: DataConfig):
     # TODO: (yupu) Support image transforms
     enable_image_transform = False
     # TODO: (yupu) Remove hard-coded video backend
-    # video_backend = "torchcodec"
+    # After not much testing, It feels like that `torchcodec` is more robust than `pyav`
+    # `pyav` crashes sometimes
+    video_backend = "torchcodec"
     # video_backend = "torchvision_av"
-    video_backend = "pyav"
+    # video_backend = "pyav"
 
     # image_transforms = ImageTransforms(cfg.image_transforms) if enable_image_transform else None
 
@@ -907,22 +909,26 @@ def main(config: TrainConfig, seed: int):
     # debugpy.breakpoint()
 
     set_seed(seed)
+    print(f"[DEBUG RNG main] After set_seed: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
 
     local_rank = init_ddp()
     device = torch.device("cuda", local_rank)
     rank = dist.get_rank()
     is_main_process = rank == 0 and local_rank == 0
+    print(f"[DEBUG RNG main] After init_ddp: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
 
     dataset = make_dataset(config.data)
+    print(f"[DEBUG RNG main] After make_dataset: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
 
     dist.barrier()
 
     # Reset seed before model creation to match starVLA initialization order
     # (starVLA creates model before dataset, so we reset seed to get same weights)
     set_seed(seed)
+    print(f"[DEBUG RNG main] After 2nd set_seed: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
 
     policy, input_features, output_features = make_policy(config=config, ds_meta=dataset.meta)
-    register_debug_hooks(policy)
+    # register_debug_hooks(policy)
 
     dist.barrier()
 
