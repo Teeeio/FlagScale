@@ -60,7 +60,7 @@ model:
     add_pos_embed: True
     max_seq_len: 1024
     action_dim: 7
-    state_dim: 8
+    state_dim: 7
     future_action_window_size: 7
     action_horizon: 8
     past_action_window_size: 0

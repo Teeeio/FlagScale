@@ -4,7 +4,6 @@ import torch.nn as nn
 from flagscale.models.action_model.gr00t_action_header import (
     FlowmatchingActionHead as _FlowmatchingActionHead,
 )
-from flagscale.models.vla.utils import get_vlm_config
 from flagscale.train.train_config import TrainConfig
 
 
@@ -20,11 +19,16 @@ class FlowMatchingHead(nn.Module):
 
     def __init__(self, vlm_config, action_config: dict, full_config: TrainConfig = None):
         super().__init__()
-        vlm_info = get_vlm_config(vlm_config)
-        self.hidden_size = vlm_info["hidden_size"]
+        # vlm_info = get_vlm_config(vlm_config)
+        # self.hidden_size = vlm_info["hidden_size"]
+
+        # print(f"self.hidden_size: {self.hidden_size}")
+        # assert False
 
         # TODO: pass cross_attention_dim directly to action head instead of mutating full_config
-        full_config.model.action_model.diffusion_model_cfg.cross_attention_dim = self.hidden_size
+        full_config.model.action_model.diffusion_model_cfg.cross_attention_dim = (
+            2560  # self.hidden_size
+        )
 
         self._head = _FlowmatchingActionHead(full_config=full_config)
 

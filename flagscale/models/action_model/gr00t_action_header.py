@@ -230,7 +230,13 @@ class FlowmatchingActionHead(nn.Module):
         self.input_embedding_dim = action_model_cfg["input_embedding_dim"]
         diffusion_model_cfg = config.diffusion_model_cfg
         diffusion_model_cfg = {**action_model_cfg, **diffusion_model_cfg}
+        print(
+            f"[DEBUG RNG ActionHead] Before DiT: state[:10] = {torch.get_rng_state()[:10].tolist()}"
+        )
         self.model = DiT(**diffusion_model_cfg)
+        print(
+            f"[DEBUG RNG ActionHead] After DiT: state[:10] = {torch.get_rng_state()[:10].tolist()}"
+        )
         self.action_dim = config.action_dim
         self.action_horizon = config.future_action_window_size + 1
         self.num_inference_timesteps = config.num_inference_timesteps
@@ -244,22 +250,37 @@ class FlowmatchingActionHead(nn.Module):
             if config.state_dim
             else None
         )
+        print(
+            f"[DEBUG RNG ActionHead] After state_encoder: state[:10] = {torch.get_rng_state()[:10].tolist()}"
+        )
 
         self.action_encoder = ActionEncoder(
             action_dim=config.action_dim,
             hidden_size=self.input_embedding_dim,
+        )
+        print(
+            f"[DEBUG RNG ActionHead] After action_encoder: state[:10] = {torch.get_rng_state()[:10].tolist()}"
         )
         self.action_decoder = MLP(
             input_dim=self.model.config.output_dim,
             hidden_dim=self.hidden_size,
             output_dim=self.action_dim,
         )
+        print(
+            f"[DEBUG RNG ActionHead] After action_decoder: state[:10] = {torch.get_rng_state()[:10].tolist()}"
+        )
         self.future_tokens = nn.Embedding(config.num_target_vision_tokens, self.input_embedding_dim)
         nn.init.normal_(self.future_tokens.weight, mean=0.0, std=0.02)
+        print(
+            f"[DEBUG RNG ActionHead] After future_tokens: state[:10] = {torch.get_rng_state()[:10].tolist()}"
+        )
 
         if config.add_pos_embed:
             self.position_embedding = nn.Embedding(config.max_seq_len, self.input_embedding_dim)
             nn.init.normal_(self.position_embedding.weight, mean=0.0, std=0.02)
+            print(
+                f"[DEBUG RNG ActionHead] After position_embedding: state[:10] = {torch.get_rng_state()[:10].tolist()}"
+            )
 
         self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)
         self.num_timestep_buckets = config.num_timestep_buckets

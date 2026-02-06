@@ -19,7 +19,11 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.optim import Optimizer
-from torch.nn.parallel import DistributedDataParallel as DDP
+# from torch.nn.parallel import DistributedDataParallel as DDP  # Commented out: using accelerate instead
+
+# Accelerate for distributed training (matching starVLA)
+from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs, set_seed as accelerate_set_seed
 
 from flagscale.runner.utils import logger
 from flagscale.train.train_config import TrainConfig, DataConfig
@@ -320,29 +324,38 @@ def remove_debug_hooks_force(model_obj):
 
 
 
-def set_seed(seed: int):
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+# Commented out: using accelerate's set_seed instead
+# def set_seed(seed: int):
+#     np.random.seed(seed)
+#     random.seed(seed)
+#     torch.manual_seed(seed)
+#     if torch.cuda.is_available():
+#         torch.cuda.manual_seed_all(seed)
+#
+#     torch.backends.cudnn.enabled = True
+#     torch.backends.cudnn.benchmark = True
+#     torch.backends.cudnn.deterministic = True
+#     torch.backends.cuda.matmul.allow_tf32 = True
 
+def set_seed(seed: int):
+    """Wrapper around accelerate's set_seed with additional cudnn settings."""
+    accelerate_set_seed(seed)
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
-    # torch.backends.cudnn.benchmark = False
-    # torch.backends.cudnn.deterministic = False
-    # torch.backends.cuda.matmul.allow_tf32 = True
 
+# Commented out: using accelerate instead of manual DDP
+# def init_ddp():
+#     local_rank = int(os.environ["LOCAL_RANK"])
+#     torch.cuda.set_device(local_rank)
+#     torch.distributed.init_process_group(backend="nccl", init_method="env://")
+#     return local_rank
 
-def init_ddp():
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    torch.distributed.init_process_group(backend="nccl", init_method="env://")
-
-    return local_rank
+# Initialize Accelerator at module level (matching starVLA)
+ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
 
 
 # TODO: (yupu) Re-enable wandb
@@ -835,11 +848,11 @@ def update_policy(
     Performs a single training step to update the policy's weights.
 
     This function executes the forward and backward passes, clips gradients, and steps the optimizer and
-    learning rate scheduler.
+    learning rate scheduler. Uses accelerate for distributed training (matching starVLA).
 
     Args:
         train_metrics: A MetricsTracker instance to record training statistics.
-        policy: The policy model to be trained (wrapped in DDP if not using Accelerator).
+        policy: The policy model to be trained (wrapped by accelerator).
         batch: A batch of training data.
         optimizer: The optimizer used to update the policy's parameters.
         grad_clip_norm: The maximum norm for gradient clipping.
@@ -852,53 +865,96 @@ def update_policy(
         - A dictionary of outputs from the policy's forward pass, for logging purposes.
     """
     start_time = time.perf_counter()
-    # policy.train()
 
-    # Get the policy model (unwrap DDP if needed) to access config
-    policy_model = policy.module if isinstance(policy, DDP) else policy
+    # Get the policy model (unwrap accelerator if needed) to access config
+    policy_model = accelerator.unwrap_model(policy)
 
     print(f"use_amp: {use_amp}")
 
-    autocast_context = (
-        torch.amp.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
-    )
+    # Use accelerator.accumulate for gradient accumulation support (matching starVLA)
+    with accelerator.accumulate(policy):
+        optimizer.zero_grad()
 
-    with autocast_context:
-        loss = policy.forward(batch)
-    loss.backward()
-
-    # Clip gradients if specified
-    if grad_clip_norm > 0:
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            policy.module.parameters() if isinstance(policy, DDP) else policy.parameters(),
-            grad_clip_norm,
-        )
-    else:
-        # Compute grad norm even if not clipping
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            policy.module.parameters() if isinstance(policy, DDP) else policy.parameters(),
-            float("inf"),
-            error_if_nonfinite=False,
+        autocast_context = (
+            torch.amp.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
         )
 
-    with lock if lock is not None else nullcontext():
-        optimizer.step()
-    optimizer.zero_grad()
+        with autocast_context:
+            loss = policy.forward(batch)
 
-    # Step through pytorch scheduler at every batch instead of epoch
-    if lr_scheduler is not None:
-        lr_scheduler.step()
+        # Use accelerator.backward instead of loss.backward() (matching starVLA)
+        accelerator.backward(loss)
+
+        # Clip gradients using accelerator (matching starVLA)
+        grad_norm = None
+        if grad_clip_norm > 0:
+            grad_norm = accelerator.clip_grad_norm_(policy.parameters(), grad_clip_norm)
+        else:
+            # Compute grad norm even if not clipping
+            grad_norm = accelerator.clip_grad_norm_(policy.parameters(), float("inf"))
+
+        with lock if lock is not None else nullcontext():
+            optimizer.step()
+
+        # Step through pytorch scheduler at every batch instead of epoch
+        if lr_scheduler is not None:
+            lr_scheduler.step()
 
     # Update internal buffers if policy has update method
     if has_method(policy_model, "update"):
         policy_model.update()
 
     train_metrics.loss = loss.item()
-    train_metrics.grad_norm = grad_norm.item()
+    train_metrics.grad_norm = grad_norm.item() if grad_norm is not None else 0.0
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
 
     return train_metrics
+
+
+# Commented out: old update_policy using manual DDP
+# def update_policy_old(
+#     train_metrics: MetricsTracker,
+#     policy,
+#     batch: Any,
+#     optimizer: Optimizer,
+#     use_amp: bool,
+#     grad_clip_norm: float,
+#     lr_scheduler=None,
+#     lock=None,
+# ) -> tuple[MetricsTracker, dict]:
+#     start_time = time.perf_counter()
+#     policy_model = policy.module if isinstance(policy, DDP) else policy
+#     print(f"use_amp: {use_amp}")
+#     autocast_context = (
+#         torch.amp.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
+#     )
+#     with autocast_context:
+#         loss = policy.forward(batch)
+#     loss.backward()
+#     if grad_clip_norm > 0:
+#         grad_norm = torch.nn.utils.clip_grad_norm_(
+#             policy.module.parameters() if isinstance(policy, DDP) else policy.parameters(),
+#             grad_clip_norm,
+#         )
+#     else:
+#         grad_norm = torch.nn.utils.clip_grad_norm_(
+#             policy.module.parameters() if isinstance(policy, DDP) else policy.parameters(),
+#             float("inf"),
+#             error_if_nonfinite=False,
+#         )
+#     with lock if lock is not None else nullcontext():
+#         optimizer.step()
+#     optimizer.zero_grad()
+#     if lr_scheduler is not None:
+#         lr_scheduler.step()
+#     if has_method(policy_model, "update"):
+#         policy_model.update()
+#     train_metrics.loss = loss.item()
+#     train_metrics.grad_norm = grad_norm.item()
+#     train_metrics.lr = optimizer.param_groups[0]["lr"]
+#     train_metrics.update_s = time.perf_counter() - start_time
+#     return train_metrics
 
 
 def main(config: TrainConfig, seed: int):
@@ -911,16 +967,23 @@ def main(config: TrainConfig, seed: int):
     set_seed(seed)
     print(f"[DEBUG RNG main] After set_seed: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
 
-    local_rank = init_ddp()
-    device = torch.device("cuda", local_rank)
-    rank = dist.get_rank()
-    is_main_process = rank == 0 and local_rank == 0
-    print(f"[DEBUG RNG main] After init_ddp: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
+    # Use accelerator instead of manual DDP (matching starVLA)
+    device = accelerator.device
+    is_main_process = accelerator.is_main_process
+    accelerator.print(accelerator.state)
+    print(f"[DEBUG RNG main] After accelerator setup: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
+
+    # Commented out: old manual DDP initialization
+    # local_rank = init_ddp()
+    # device = torch.device("cuda", local_rank)
+    # rank = dist.get_rank()
+    # is_main_process = rank == 0 and local_rank == 0
+    # print(f"[DEBUG RNG main] After init_ddp: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
 
     dataset = make_dataset(config.data)
     print(f"[DEBUG RNG main] After make_dataset: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
 
-    dist.barrier()
+    accelerator.wait_for_everyone()  # Use accelerator instead of dist.barrier()
 
     # Reset seed before model creation to match starVLA initialization order
     # (starVLA creates model before dataset, so we reset seed to get same weights)
@@ -930,7 +993,7 @@ def main(config: TrainConfig, seed: int):
     policy, input_features, output_features = make_policy(config=config, ds_meta=dataset.meta)
     # register_debug_hooks(policy)
 
-    dist.barrier()
+    accelerator.wait_for_everyone()  # Use accelerator instead of dist.barrier()
 
     # Create processors - only provide dataset_stats if not resuming from saved processors
     processor_kwargs = {}
@@ -966,11 +1029,12 @@ def main(config: TrainConfig, seed: int):
     )
 
     # DistributedSampler ensures each rank gets different data
+    # Use accelerator's process info (matching starVLA pattern)
     sampler = torch.utils.data.distributed.DistributedSampler(
         # dataset,
         starvla_dataset,
-        num_replicas=dist.get_world_size(),
-        rank=dist.get_rank(),
+        num_replicas=accelerator.num_processes,
+        rank=accelerator.process_index,
         shuffle=shuffle,
         drop_last=False,
     )
@@ -996,17 +1060,23 @@ def main(config: TrainConfig, seed: int):
             overrides=preprocessor_overrides
         )
 
-    # Setup optimizer and scheduler (applies freeze config before DDP wrapping)
+    # Setup optimizer and scheduler (applies freeze config before accelerator.prepare)
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(policy, config)
 
-    policy = DDP(
-        policy,
-        device_ids=[local_rank],
-        find_unused_parameters=True,
-        output_device=local_rank,
-    )
+    # Use accelerator.prepare instead of manual DDP wrapping (matching starVLA)
+    # This handles DDP wrapping, moving to device, etc.
+    accelerator.dataloader_config.dispatch_batches = False  # Match starVLA setting
+    policy, optimizer, dataloader = accelerator.prepare(policy, optimizer, dataloader)
 
-    dist.barrier()
+    # Commented out: old manual DDP wrapping
+    # policy = DDP(
+    #     policy,
+    #     device_ids=[local_rank],
+    #     find_unused_parameters=True,
+    #     output_device=local_rank,
+    # )
+
+    accelerator.wait_for_everyone()  # Use accelerator instead of dist.barrier()
 
     dl_iter = cycle(dataloader)
 
@@ -1020,7 +1090,8 @@ def main(config: TrainConfig, seed: int):
         "dataloading_s": AverageMeter("data_s", ":.3f"),
     }
 
-    effective_batch_size = config.system.batch_size * dist.get_world_size()
+    # Use accelerator.num_processes instead of dist.get_world_size()
+    effective_batch_size = config.system.batch_size * accelerator.num_processes
 
     step = 0
 
@@ -1086,7 +1157,7 @@ def main(config: TrainConfig, seed: int):
             and step % config.system.checkpoint.save_freq == 0
         ):
             # Synchronize all processes before checkpoint saving
-            dist.barrier()
+            accelerator.wait_for_everyone()
 
             if is_main_process:
                 from pathlib import Path
@@ -1095,7 +1166,8 @@ def main(config: TrainConfig, seed: int):
                 checkpoint_dir = get_step_checkpoint_dir(
                     output_dir, config.system.train_steps, step
                 )
-                policy_to_save = policy.module
+                # Use accelerator.unwrap_model instead of policy.module
+                policy_to_save = accelerator.unwrap_model(policy)
                 save_checkpoint(
                     checkpoint_dir=checkpoint_dir,
                     policy=policy_to_save,
@@ -1105,14 +1177,15 @@ def main(config: TrainConfig, seed: int):
                 update_last_checkpoint(checkpoint_dir)
 
             # Synchronize all processes after checkpoint saving
-            dist.barrier()
+            accelerator.wait_for_everyone()
 
     if is_main_process:
         logger.info("Training completed")
 
-    # Properly clean up the distributed process group
-    dist.barrier()
-    dist.destroy_process_group()
+    # Properly clean up using accelerator (matching starVLA)
+    accelerator.wait_for_everyone()
+    # Note: accelerator handles process group cleanup automatically
+    # dist.destroy_process_group()  # Commented out: handled by accelerator
 
 
 if __name__ == "__main__":
