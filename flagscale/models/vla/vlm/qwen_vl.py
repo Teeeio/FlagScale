@@ -35,9 +35,10 @@ class QwenVLBackbone(nn.Module):
         qwenvl_config = config.model.qwenvl
         self.model_id = qwenvl_config.base_vlm
 
+        # TODO: (yupu) The model loaded by `from_pretrained` is eval mode by default, is this expected? I removed `policy.train()` in train_qwen_gr00t.py to match starVLA, but not sure if this is the right way to do this.
         self.model = self._load_model(self.model_id)
         self.processor = AutoProcessor.from_pretrained(self.model_id)
-        # FIXME: hard-coded padding side
+        # FIXME: Hard-coded padding side
         self.processor.tokenizer.padding_side = "left"
         self._config: TrainConfig = config
 
