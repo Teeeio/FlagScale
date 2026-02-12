@@ -1,0 +1,11 @@
+engine:
+  model_variant: "QwenGr00t"
+  model: /share/project/fengyupu/github/FlagScale_2/outputs/qwen_gr00t_train/20260207_110505.701567_ckpt/last
+  device: "cuda"
+
+generate:
+  images:
+    observation.images.wrist_image: qwen_gr00t_inference_inputs/frame_100_observation_images_wrist_image.jpg
+    observation.images.image: qwen_gr00t_inference_inputs/frame_100_observation_images_image.jpg
+  state_path: qwen_gr00t_inference_inputs/frame_100_state.pt
+  task_path: qwen_gr00t_inference_inputs/frame_100_task.txt

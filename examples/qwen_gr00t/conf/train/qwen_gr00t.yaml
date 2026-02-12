@@ -1,10 +1,10 @@
 system:
   batch_size: 16
-  train_steps: 80000
+  train_steps: 30000
   log_freq: 1
   grad_clip_norm: 1.0
   use_amp: true
-  shuffle: false
+  shuffle: true
   num_workers: 4
 
   optimizer:
@@ -31,7 +31,7 @@ system:
   checkpoint:
     output_directory: ${experiment.exp_dir}
     # Whether to save checkpoint
-    save_checkpoint: false
+    save_checkpoint: true
     # Number of steps between checkpoints
     save_freq: 1000
   # TODO(yupu): Support resuming from checkpoint
@@ -73,11 +73,11 @@ model:
     num_target_vision_tokens: 32
     diffusion_model_cfg:
       cross_attention_dim: 2048
-      # dropout: 0.2
-      # final_dropout: True
-      # FIXME: Debug only
-      dropout: 0
-      final_dropout: False
+      dropout: 0.2
+      final_dropout: True
+      # # FIXME: Debug only
+      # dropout: 0
+      # final_dropout: False
       interleave_self_attention: True
       norm_type: ada_norm
       num_layers: 16
@@ -86,7 +86,7 @@ model:
   reduce_in_full_precision: True
 
   # ============================================================
-  # Module Freezing Configuration (NeMo-style pattern matching)
+  # Module Freezing Configuration
   # ============================================================
   # Freezing logic: freeze_patterns are applied first, then keep_patterns override.
   # Patterns are regex matched against full parameter names.

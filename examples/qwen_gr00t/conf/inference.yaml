@@ -1,15 +1,15 @@
 defaults:
   - _self_
-  - inference: pi0
+  - inference: qwen_gr00t
 
 experiment:
-  exp_name: pi0_inference
+  exp_name: qwen_gr00t_inference
   exp_dir: outputs/${experiment.exp_name}
-  model: /models/lerobot/pi0
+  model: /models/qwen_gr00t
   task:
     type: inference
     backend: vllm # TODO: Remove this restriction
-    entrypoint: flagscale/inference/inference_pi.py
+    entrypoint: flagscale/inference/inference_qwen_gr00t.py
   runner:
     hostfile: null
   cmds:

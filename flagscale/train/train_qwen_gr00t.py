@@ -341,9 +341,9 @@ def set_seed(seed: int):
     """Wrapper around accelerate's set_seed with additional cudnn settings."""
     accelerate_set_seed(seed)
     torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cuda.matmul.allow_tf32 = False
 
 
 # Commented out: using accelerate instead of manual DDP
@@ -987,8 +987,8 @@ def main(config: TrainConfig, seed: int):
 
     # Reset seed before model creation to match starVLA initialization order
     # (starVLA creates model before dataset, so we reset seed to get same weights)
-    set_seed(seed)
-    print(f"[DEBUG RNG main] After 2nd set_seed: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
+    # set_seed(seed)
+    # print(f"[DEBUG RNG main] After 2nd set_seed: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
 
     policy, input_features, output_features = make_policy(config=config, ds_meta=dataset.meta)
     # register_debug_hooks(policy)
@@ -1017,22 +1017,22 @@ def main(config: TrainConfig, seed: int):
     num_workers = 0 # config.system.num_workers
     shuffle = config.system.shuffle
 
-    # Wrap dataset with StarVLAFormatDataset for starVLA-compatible output format
-    image_keys = getattr(config.data, "image_keys", None) or [
-        "observation.images.image",
-        "observation.images.wrist_image",
-    ]
-    starvla_dataset = StarVLAFormatDataset(
-        dataset,
-        image_keys=image_keys,
-        image_size=(224, 224),
-    )
+    # # Wrap dataset with StarVLAFormatDataset for starVLA-compatible output format
+    # image_keys = getattr(config.data, "image_keys", None) or [
+    #     "observation.images.image",
+    #     "observation.images.wrist_image",
+    # ]
+    # starvla_dataset = StarVLAFormatDataset(
+    #     dataset,
+    #     image_keys=image_keys,
+    #     image_size=(224, 224),
+    # )
 
     # DistributedSampler ensures each rank gets different data
     # Use accelerator's process info (matching starVLA pattern)
     sampler = torch.utils.data.distributed.DistributedSampler(
-        # dataset,
-        starvla_dataset,
+        dataset,
+        # starvla_dataset,
         num_replicas=accelerator.num_processes,
         rank=accelerator.process_index,
         shuffle=shuffle,
@@ -1040,8 +1040,8 @@ def main(config: TrainConfig, seed: int):
     )
 
     dataloader = torch.utils.data.DataLoader(
-        # dataset,
-        starvla_dataset,
+        dataset,
+        # starvla_dataset,
         num_workers=num_workers,
         batch_size=config.system.batch_size,
         shuffle=False,  # Must be False when using sampler
@@ -1049,7 +1049,7 @@ def main(config: TrainConfig, seed: int):
         pin_memory=True,
         drop_last=False,
         prefetch_factor=2 if num_workers > 0 else None,
-        collate_fn=collate_fn_starvla,  # Return batch as list of dicts (starVLA style)
+        # collate_fn=collate_fn_starvla,  # Return batch as list of dicts (starVLA style)
     )
 
     # Setup preprocessor
@@ -1111,17 +1111,17 @@ def main(config: TrainConfig, seed: int):
     for _ in range(step, config.system.train_steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
-        # batch = {
-        #     k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
-        #     for k, v in batch.items()
-        # }
+        batch = {
+            k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()
+        }
         # print(f"batch: {batch}")
 
         # torch.save(batch, "batch_resized.pt")
         # assert 0
 
-        # if preprocessor is not None:
-        #     batch = preprocessor(batch)
+        if preprocessor is not None:
+            batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
         # print(f"batch: {batch}")
@@ -1190,7 +1190,7 @@ def main(config: TrainConfig, seed: int):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Train PI0/PI0.5 model. This script is typically called by the flagscale runner, not directly."
+        description="Train QwenGr00t model. This script is typically called by the flagscale runner, not directly."
     )
     parser.add_argument(
         "--config-file", type=str, required=True, help="Path to the configuration YAML file"
@@ -1201,6 +1201,8 @@ if __name__ == "__main__":
 
     # Load config from YAML file (Hydra-generated config.yaml contains both train and experiment)
     config = OmegaConf.load(config_file_path)
+
+    logger.info(f"full config: {config}")
 
     # Extract train config and convert to Pydantic TrainConfig (preserves raw configs)
     train_config = TrainConfig.from_hydra_config(config)
@@ -1213,10 +1215,4 @@ if __name__ == "__main__":
     logger.info(f"Experiment: {experiment_config}")
     logger.info(f"Train config: {train_config}")
 
-    # import debugpy
-    # debugpy.listen(("0.0.0.0", 9096))
-    # debugpy.wait_for_client()
-    # debugpy.breakpoint()
-
-    # Run training with both configs
     main(train_config, seed)

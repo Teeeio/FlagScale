@@ -1,13 +1,13 @@
 defaults:
 - _self_
-- serve: pi0
+- serve: qwen_gr00t
 
 experiment:
-  exp_name: pi0_serve
+  exp_name: qwen_gr00t_serve
   exp_dir: outputs/${experiment.exp_name}
   task:
     type: serve
-    entrypoint: flagscale/serve/run_serve_pi.py
+    entrypoint: flagscale/serve/run_serve_qwen_gr00t.py
   runner:
     hostfile: null
     deploy:

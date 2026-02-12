@@ -13,14 +13,12 @@ A lightweight implementation that Qwen-VL + Flow-matching head to directly predi
 Flow-matching header is copyright from GR00T N1.5,
 """
 
-import numpy as np
 import torch
 from transformers import PretrainedConfig, PreTrainedModel
 
+from flagscale.models.utils.constants import ACTION
 from flagscale.models.vla.registry import build_action_model, build_vlm
 from flagscale.train.train_config import TrainConfig
-from flagscale.train.utils.image_tools import to_pil_preserve
-from flagscale.train.utils.trainer_tools import resize_images
 
 
 class QwenGr00t(PreTrainedModel):
@@ -78,8 +76,8 @@ class QwenGr00t(PreTrainedModel):
 
     def forward(self, examples: dict, **kwargs):
         """ """
-        actions = [example["action"] for example in examples]  # [B, T, action_dim]
-        # actions = examples[ACTION]
+        # actions = [example["action"] for example in examples]  # [B, T, action_dim]
+        actions = examples[ACTION]
         state = None  # examples[OBS_STATE]
 
         # Step 1: QWenVL input format
@@ -109,10 +107,10 @@ class QwenGr00t(PreTrainedModel):
         # Step 4: Action Expert Forward and Loss
         with torch.autocast("cuda", dtype=torch.float32):
             # TODO: (yupu) Is this a bug or a feature? The action dtype would stay as bf16 under this autocast.
-            # actions = actions.to(device=last_hidden.device, dtype=last_hidden.dtype)
-            actions = torch.tensor(
-                np.array(actions), device=last_hidden.device, dtype=last_hidden.dtype
-            )  # [B, T_full, action_dim]
+            actions = actions.to(device=last_hidden.device, dtype=last_hidden.dtype)
+            # actions = torch.tensor(
+            #     np.array(actions), device=last_hidden.device, dtype=last_hidden.dtype
+            # )  # [B, T_full, action_dim]
 
             # TODO: does not match RoboBrainX, need to check
             actions_target = actions[
@@ -170,39 +168,45 @@ class QwenGr00t(PreTrainedModel):
         """
         # TODO: (yupu) Fix inference input format to use constants (OBS_IMAGE, OBS_LANGUAGE, OBS_STATE)
         # instead of hardcoded keys. The current keys are inconsistent with training batch format.
-        if type(examples) is not list:
-            examples = [examples]
-        batch_images = [[to_pil_preserve(example["image"])] for example in examples]  # [B, [PLT]]
-        instructions = [example["lang"] for example in examples]  # [B, str]
+        # batch_images = [[to_pil_preserve(example["image"])] for example in examples]  # [B, [PLT]]
+        # instructions = [example["lang"] for example in examples]  # [B, str]
 
-        state = (
-            [example["state"] for example in examples] if "state" in examples[0] else None
-        )  # [B, 1, state_dim]
+        # We assume the images are already resized during preprocessing.
+        qwen_inputs = self.vlm.prepare_input(examples)
+        state = None  # examples[OBS_STATE]
 
-        train_obs_image_size = getattr(self._config.data.vla_data, "image_size", None)
-        if train_obs_image_size:
-            batch_images = resize_images(batch_images, target_size=train_obs_image_size)
+        # state = (
+        #     [example["state"] for example in examples] if "state" in examples[0] else None
+        # )  # [B, 1, state_dim]
 
-        # Step 1: QWenVL input format
-        qwen_inputs = self.vlm.build_qwenvl_inputs(
-            examples=None, images=batch_images, instructions=instructions
-        )
+        # train_obs_image_size = getattr(self._config.data.vla_data, "image_size", None)
+        # if train_obs_image_size:
+        #     batch_images = resize_images(batch_images, target_size=train_obs_image_size)
+
+        # # Step 1: QWenVL input format
+        # qwen_inputs = self.vlm.build_qwenvl_inputs(
+        #     examples=None, images=batch_images, instructions=instructions
+        # )
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
             vlm_output = self.vlm.forward(qwen_inputs, output_attentions=False)
             # last_hidden_state: [B, seq_len, H]
             last_hidden = vlm_output["hidden_states"][-1]  # [B, L, H]
 
-        state_tensor = (
-            torch.from_numpy(np.array(state)).to(last_hidden.device, dtype=last_hidden.dtype)
-            if state is not None
-            else None
-        )
+        if state is not None:
+            state = state.to(device=last_hidden.device, dtype=last_hidden.dtype)
+
+        # state_tensor = (
+        #     torch.from_numpy(np.array(state)).to(last_hidden.device, dtype=last_hidden.dtype)
+        #     if state is not None
+        #     else None
+        # )
 
         # Step 4: Action Expert Forward
         with torch.autocast("cuda", dtype=torch.float32):
             vlm_output_for_action = {"hidden_states": last_hidden}
-            action_input = {"state": state_tensor}
-            output = self.action_model.predict(vlm_output_for_action, action_input)
+            action_input = {"state": state}
+            output = self.action_model.predict_action(vlm_output_for_action, action_input)
 
-        return {"normalized_actions": output["actions"].detach().cpu().numpy()}
+        # Assume the output of the action moadel is dict mapps `ACTION` to the normalized actions
+        return output

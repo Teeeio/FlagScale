@@ -64,6 +64,7 @@ def save_checkpoint(
     policy,
     config,
     preprocessor=None,
+    postprocessor=None,
 ) -> None:
     """Save model weights, config, and preprocessor state.
 
@@ -97,6 +98,8 @@ def save_checkpoint(
 
     if preprocessor is not None:
         preprocessor.save_pretrained(pretrained_dir)
+    if postprocessor is not None:
+        postprocessor.save_pretrained(pretrained_dir)
 
 
 def load_checkpoint(
@@ -171,7 +174,15 @@ def load_checkpoint(
             config_filename="policy_preprocessor.json",
         )
 
-    return model, preprocessor
+    postprocessor = None
+    postprocessor_config_path = pretrained_dir / "policy_postprocessor.json"
+    if postprocessor_config_path.exists():
+        postprocessor = PolicyProcessorPipeline.from_pretrained(
+            pretrained_dir,
+            config_filename="policy_postprocessor.json",
+        )
+
+    return model, preprocessor, postprocessor
 
 
 # def save_training_state(

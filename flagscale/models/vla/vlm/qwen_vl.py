@@ -61,6 +61,7 @@ class QwenVLBackbone(nn.Module):
                 return_dict=True,
                 **kwargs,
             )
+        # TODO: (yupu) We should output the original outputs, not just the hidden states.
         return {"hidden_states": outputs.hidden_states}
 
 
@@ -207,6 +208,7 @@ class Qwen3VLBackbone(QwenVLBackbone):
 
     def _load_model(self, model_id: str) -> Qwen3VLForConditionalGeneration:
         # FIXME: hard-coded attn_implementation and torch_dtype matches starVLA
+        # TODO: (yupu): During inference/serving, it's required to load model twice, not only that, the original qwen model has to be loaded!
         model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_id,
             attn_implementation="flash_attention_2",
@@ -219,20 +221,20 @@ class Qwen3VLBackbone(QwenVLBackbone):
     def prepare_input(self, batch: dict) -> dict[str, torch.Tensor]:
         # TODO: (yupu) This is a hack, we should find a better way to handle this.
         # image_keys = self._config.data.vla_data.image_features.keys()
-        # image_keys = ["observation.images.image", "observation.images.wrist_image"]
+        image_keys = ["observation.images.image", "observation.images.wrist_image"]
 
         # Extract data in starVLA format (list of dicts)
-        examples = batch
-        batch_images = [example["image"] for example in examples]  # [B, [PIL]]
-        instructions = [example["lang"] for example in examples]  # [B, str]
+        # examples = batch
+        # batch_images = [example["image"] for example in examples]  # [B, [PIL]]
+        # instructions = [example["lang"] for example in examples]  # [B, str]
         # actions = [example["action"] for example in examples]  # [B, T, action_dim]
         # state = None
 
-        return self.build_qwenvl_inputs(
-            examples=None, images=batch_images, instructions=instructions
-        )
+        # return self.build_qwenvl_inputs(
+        #     examples=None, images=batch_images, instructions=instructions
+        # )
 
-        # return self.build_qwenvl_inputs(examples=batch, image_keys=image_keys)
+        return self.build_qwenvl_inputs(examples=batch, image_keys=image_keys)
 
     # TODO: (yupu) Refactor this args
     def build_qwenvl_inputs(
@@ -283,9 +285,9 @@ class Qwen3VLBackbone(QwenVLBackbone):
 
             images = batch_images
 
-        import numpy as np
+        # import numpy as np
 
-        torch.save(np.array([np.array(img) for img in images[0]]), "raw_images.pt")
+        # torch.save(np.array([np.array(img) for img in images[0]]), "raw_images.pt")
         # assert False
 
         # Create messages: one message per sample

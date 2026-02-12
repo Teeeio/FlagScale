@@ -313,9 +313,9 @@ class FlowmatchingActionHead(nn.Module):
                 f"(from config), but received actions with {actions.shape[-1]} dimensions. "
                 f"Please update config.model.action_model.action_dim to match your data."
             )
-        # DEBUG: deterministic timesteps for alignment verification
-        torch.manual_seed(42)
-        torch.cuda.manual_seed(42)
+        # # DEBUG: deterministic timesteps for alignment verification
+        # torch.manual_seed(42)
+        # torch.cuda.manual_seed(42)
 
         # DEBUG: Print input shapes and stats
         print(f"[ACTION HEAD] vl_embs shape: {vl_embs.shape}, norm: {vl_embs.norm().item():.4f}")
@@ -441,16 +441,3 @@ class FlowmatchingActionHead(nn.Module):
     @property
     def dtype(self):
         return next(iter(self.parameters())).dtype
-
-
-def get_action_model(config=None):
-    """
-    Factory: build FlowmatchingActionHead from global framework config.
-
-    Args:
-        config: Global config (expects config.model.action_model namespace).
-
-    Returns:
-        FlowmatchingActionHead: Initialized FlowMatchingActionHead.
-    """
-    return FlowmatchingActionHead(full_config=config)
