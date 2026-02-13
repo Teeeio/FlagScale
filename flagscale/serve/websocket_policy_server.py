@@ -1,81 +1,82 @@
-# Copyright 2025 starVLA community. All rights reserved.
-# Licensed under the MIT License, Version 1.0 (the "License");
-# Implemented by [Jinhui YE / HKUST University] in [2025].
-
 import asyncio
-import logging
+import http
 import time
 import traceback
+from typing import Protocol, runtime_checkable
 
-import websockets.asyncio.server
+import websockets.asyncio.server as _server
 import websockets.frames
+from websockets.http11 import Request, Response
 
-# from openpi_client import base_policy as _base_policy
 from . import msgpack_numpy
+from flagscale.logger import logger
+
+
+@runtime_checkable
+class Policy(Protocol):
+    def infer(self, obs: dict) -> dict: ...
 
 
 class WebsocketPolicyServer:
-    """Serves a policy using the websocket protocol. See websocket_client_policy.py for a client implementation.
+    """Serves a policy over websocket for evaluation inference.
 
-    Currently only implements the `load` and `infer` methods.
+    Protocol:
+      1. On connect, server sends metadata dict to client.
+      2. Client sends msgpack-encoded obs dict, server returns msgpack-encoded action dict.
+      3. Each response includes a "server_timing" key with latency info.
     """
 
     def __init__(
         self,
-        policy,
+        policy: Policy,
         host: str = "0.0.0.0",
         port: int = 10093,
-        idle_timeout: int = -1,  # 新增参数，单位秒，-1表示永不关闭
         metadata: dict | None = None,
     ) -> None:
-        self._policy = policy  #
+        self._policy = policy
         self._host = host
         self._port = port
         self._metadata = metadata or {}
-        self._idle_timeout = idle_timeout
-        self._last_active = time.time()
-        logging.getLogger("websockets.server").setLevel(logging.INFO)
 
     def serve_forever(self) -> None:
         asyncio.run(self.run())
 
-    async def run(self):
-        async with websockets.asyncio.server.serve(
+    async def run(self) -> None:
+        async with _server.serve(
             self._handler,
             self._host,
             self._port,
             compression=None,
             max_size=None,
+            process_request=_health_check,
         ) as server:
-            if self._idle_timeout > 0:
-                await self._idle_watchdog(server)
-            else:
-                await server.serve_forever()
+            await server.serve_forever()
 
-    async def _idle_watchdog(self, server):
-        """监控空闲时间，超时则关闭服务器"""
-        while True:
-            await asyncio.sleep(5)
-            if time.time() - self._last_active > self._idle_timeout:
-                logging.info(f"Idle timeout ({self._idle_timeout}s) reached, shutting down server.")
-                server.close()
-                await server.wait_closed()
-                break
-
-    async def _handler(self, websocket: websockets.asyncio.server.ServerConnection):
-        logging.info(f"Connection from {websocket.remote_address} opened")
+    async def _handler(self, websocket: _server.ServerConnection) -> None:
+        logger.info(f"Connection from {websocket.remote_address} opened")
         packer = msgpack_numpy.Packer()
 
         await websocket.send(packer.pack(self._metadata))
 
+        prev_total_time: float | None = None
         while True:
             try:
-                msg = msgpack_numpy.unpackb(await websocket.recv())
-                self._last_active = time.time()  # 每次收到消息刷新活跃时间
-                ret = self._route_message(msg)  # route message
-                await websocket.send(packer.pack(ret))
+                start_time = time.monotonic()
+                obs: dict = msgpack_numpy.unpackb(await websocket.recv())
+
+                infer_time = time.monotonic()
+                action: dict = self._policy.infer(obs)
+                infer_time = time.monotonic() - infer_time
+
+                action["server_timing"] = {"infer_ms": infer_time * 1000}
+                if prev_total_time is not None:
+                    action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+
+                await websocket.send(packer.pack(action))
+                prev_total_time = time.monotonic() - start_time
+
             except websockets.ConnectionClosed:
-                logging.info(f"Connection from {websocket.remote_address} closed")
+                logger.info(f"Connection from {websocket.remote_address} closed")
                 break
             except Exception:
                 await websocket.send(traceback.format_exc())
@@ -85,56 +86,8 @@ class WebsocketPolicyServer:
                 )
                 raise
 
-    # route logic: recognize request from client
-    def _route_message(self, msg: dict) -> dict:
-        """
-        Route rules (fault-tolerant):
-        - Supports messages of form:
-            {"type": "ping|init|infer|reset", "request_id": "...", "payload": {...}}
-          or a flat dict (will be treated as payload).
-        - Does NOT raise inside this function: all exceptions are caught and encoded in response.
-        """
-        req_id = msg.get("request_id", "default")
-        mtype = msg.get("type", "infer")  # default = infer
 
-        # ping
-        if mtype == "ping":
-            return {"status": "ok", "ok": True, "type": "ping", "request_id": req_id}
-
-        # infer --> framework.predict_action
-        elif mtype == "infer" or mtype == "predict_action":
-            try:
-                print(f"message: {msg}")
-                output_dict = self._policy.infer(msg["examples"])
-            except Exception as e:
-                logging.exception("Policy inference error (request_id=%s)", req_id)
-                logging.exception(e)
-
-                return {
-                    "status": "error",
-                    "ok": False,
-                    "type": "inference_result",
-                    "request_id": req_id,
-                    "error": {
-                        "message": str(e),
-                        # "traceback": traceback.format_exc(),
-                    },
-                }
-            data = output_dict
-            return {
-                "status": "ok",
-                "ok": True,
-                "type": "inference_result",
-                "request_id": req_id,
-                "data": data,
-            }
-
-        # unknown request type
-        else:
-            return {
-                "status": "error",
-                "ok": False,
-                "type": "unknown",
-                "request_id": req_id,
-                "error": {"message": f"Unsupported message type '{mtype}'"},
-            }
+def _health_check(connection: _server.ServerConnection, request: Request) -> Response | None:
+    if request.path == "/healthz":
+        return connection.respond(http.HTTPStatus.OK, "OK\n")
+    return None

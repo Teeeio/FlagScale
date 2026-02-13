@@ -40,13 +40,13 @@ model:
   # TODO: (yupu) the config layout is still a mess
   model_name: qwen_gr00t
   # Path to the checkpoint of the pretrained base VLM model, e.g. Qwen3-VL-4B-Instruct
-  checkpoint_dir: /workspace/models/Qwen/Qwen3-VL-4B-Instruct/
+  checkpoint_dir: /share/project/fengyupu/models/Qwen/Qwen3-VL-4B-Instruct/
   # checkpoint_dir: /workspace/models/Qwen/Qwen2.5-VL-3B-Instruct/
   vlm:
     type: qwen3-vl
     # type: qwen2.5-vl
   qwenvl:
-    base_vlm: /workspace/models/Qwen/Qwen3-VL-4B-Instruct/
+    base_vlm: /share/project/fengyupu/models/Qwen/Qwen3-VL-4B-Instruct/
     # base_vlm: /workspace/models/Qwen/Qwen2.5-VL-3B-Instruct/
     attn_implementation: flash_attention_2
     vl_hidden_dim: 2048
@@ -130,7 +130,7 @@ data:
     obs: ["image_0"]
     video_backend: torchvision_av
   # Path to the training data
-  data_path: /workspace/datasets/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot/
+  data_path: /share/project/fengyupu/datasets/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot/
   tolerance_s: 0.0001
   use_imagenet_stats: False
   # To match the input features naming from the dataset to the policy config

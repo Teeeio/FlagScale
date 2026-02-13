@@ -34,9 +34,14 @@ class Policy:
         logger.info(f"Policy model loading latency: {time.perf_counter() - t_s:.2f}s")
 
     def infer(self, batch):
+        # FIXME: image reisze
         logger.info("Start to inference")
-        if isinstance(batch, list):
-            batch = batch[0]
+        print(f"batch: {batch}")
+        # TODO: (yupu) remove hard-code
+        batch = batch["examples"][0]
+        for k, v in batch.items():
+            if "image" in k:
+                print(f"{k}: type {type(v)} shape {v.shape}")
         batch = self.preprocessor(batch)
 
         with torch.no_grad():
@@ -73,7 +78,6 @@ def main(config):
         policy=policy,
         host=policy.host,
         port=policy.port,
-        idle_timeout=-1,
         metadata={"env": "simpler_env"},
     )
     logger.info("server running ...")

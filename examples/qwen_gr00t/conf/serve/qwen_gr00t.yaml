@@ -1,7 +1,7 @@
 - serve_id: vllm_model # Not in use
   engine_args:
     host: 0.0.0.0
-    port: 5000
+    port: 6000
     model_variant: QwenGr00t
     model: /share/project/fengyupu/github/FlagScale_2/outputs/qwen_gr00t_train/20260208_112711.741406_ckpt/last
     device: "cuda"

@@ -3,7 +3,7 @@ defaults:
 - serve: qwen_gr00t
 
 experiment:
-  exp_name: qwen_gr00t_serve
+  exp_name: qwen_gr00t_serve_2
   exp_dir: outputs/${experiment.exp_name}
   task:
     type: serve
@@ -13,7 +13,7 @@ experiment:
     deploy:
       use_fs_serve: false
   envs:
-    CUDA_VISIBLE_DEVICES: 0
+    CUDA_VISIBLE_DEVICES: 3
     CUDA_DEVICE_MAX_CONNECTIONS: 1
 
 action: run
