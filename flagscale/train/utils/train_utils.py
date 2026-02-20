@@ -18,7 +18,7 @@
 from pathlib import Path
 
 from omegaconf import OmegaConf
-from safetensors.torch import load_model, save_model
+from safetensors.torch import load_model, save_file
 
 from flagscale.models.utils.constants import (
     CHECKPOINTS_DIR,
@@ -93,8 +93,10 @@ def save_checkpoint(
         config = OmegaConf.create(config)
     OmegaConf.save(config, pretrained_dir / "train_config.yaml")
 
-    # Save model weights (save_model handles shared tensors like tied embeddings)
-    save_model(policy, pretrained_dir / "model.safetensors")
+    # Save model weights. Clone tensors to avoid safetensors errors with
+    # non-contiguous views (e.g. from DeepSpeed-wrapped models).
+    state_dict = {k: v.clone().contiguous() for k, v in policy.state_dict().items()}
+    save_file(state_dict, pretrained_dir / "model.safetensors")
 
     if preprocessor is not None:
         preprocessor.save_pretrained(pretrained_dir)
@@ -143,8 +145,8 @@ def load_checkpoint(
     weights_path = pretrained_dir / "model.safetensors"
     if not weights_path.exists():
         raise FileNotFoundError(f"Weights file not found: {weights_path}")
-    # TODO: (yupu) Some modules could be loaded twice
-    missing_keys, unexpected_keys = load_model(model, weights_path, device=device)
+    # strict=False to handle tied weights saved as separate entries
+    missing_keys, unexpected_keys = load_model(model, weights_path, device=device, strict=False)
     if missing_keys:
         print(f"Warning: Missing keys when loading checkpoint: {len(missing_keys)} keys")
         if len(missing_keys) <= 10:

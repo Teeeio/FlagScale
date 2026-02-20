@@ -3,7 +3,7 @@ defaults:
 - serve: qwen_gr00t
 
 experiment:
-  exp_name: qwen_gr00t_serve_2
+  exp_name: qwen_gr00t_serve
   exp_dir: outputs/${experiment.exp_name}
   task:
     type: serve

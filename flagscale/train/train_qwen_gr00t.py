@@ -22,7 +22,7 @@ from torch.optim import Optimizer
 # from torch.nn.parallel import DistributedDataParallel as DDP  # Commented out: using accelerate instead
 
 # Accelerate for distributed training (matching starVLA)
-from accelerate import Accelerator
+from accelerate import Accelerator, DeepSpeedPlugin
 from accelerate.utils import DistributedDataParallelKwargs, set_seed as accelerate_set_seed
 
 from flagscale.runner.utils import logger
@@ -69,6 +69,7 @@ IMAGENET_STATS = {
 from PIL import Image
 from torch.utils.data import Dataset as TorchDataset
 
+
 def collate_fn_starvla(batch):
     """Simple collate function that returns batch as list of dicts (starVLA style)."""
     return batch
@@ -109,9 +110,9 @@ class StarVLAFormatDataset(TorchDataset):
         self.action_min = action_stats.get("min", None)
         self.action_max = action_stats.get("max", None)
         # Convert to numpy if needed
-        if self.action_min is not None and hasattr(self.action_min, 'numpy'):
+        if self.action_min is not None and hasattr(self.action_min, "numpy"):
             self.action_min = self.action_min.numpy()
-        if self.action_max is not None and hasattr(self.action_max, 'numpy'):
+        if self.action_max is not None and hasattr(self.action_max, "numpy"):
             self.action_max = self.action_max.numpy()
 
         # Debug: print stats
@@ -175,7 +176,9 @@ class StarVLAFormatDataset(TorchDataset):
             frame_idx = item.get("index", idx)
             if isinstance(frame_idx, torch.Tensor):
                 frame_idx = frame_idx.item()
-            print(f"[StarVLAFormatDataset] idx={idx} traj={traj_id} frame={frame_idx} RAW action[0,:5]: {action[0,:5].tolist()}")
+            print(
+                f"[StarVLAFormatDataset] idx={idx} traj={traj_id} frame={frame_idx} RAW action[0,:5]: {action[0, :5].tolist()}"
+            )
             print(f"[StarVLAFormatDataset] idx={idx} RAW action sum: {action.sum():.4f}")
 
         # Apply min_max normalization (matching starVLA's Libero4in1DataConfig exactly)
@@ -202,7 +205,7 @@ class StarVLAFormatDataset(TorchDataset):
 
         # Debug: print normalized action values (only first few samples)
         if self._debug_count < 16:
-            print(f"[StarVLAFormatDataset] idx={idx} NORM action[0,:5]: {action[0,:5].tolist()}")
+            print(f"[StarVLAFormatDataset] idx={idx} NORM action[0,:5]: {action[0, :5].tolist()}")
             print(f"[StarVLAFormatDataset] idx={idx} NORM action sum: {action.sum():.4f}")
             self._debug_count += 1
 
@@ -229,16 +232,19 @@ class StarVLAFormatDataset(TorchDataset):
             frame_index=frame_index,
         )
 
+
 def register_debug_hooks(model_obj):
     """
     给模型挂载带有 Rank 信息的 Forward 和 Backward Hook
     model_obj: 可以是 model (list) 也可以是 model[0] (module)
     """
+
     # 1. 获取 Rank 的辅助函数
     def get_rank():
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             return torch.distributed.get_rank()
         return 0
+
     # 2. 通用打印函数
     def calc_and_print(tensor, name, tag):
         """
@@ -257,6 +263,7 @@ def register_debug_hooks(model_obj):
             val = torch.sum(tensor.detach().to(torch.float32)).item()
             # 打印格式：[Rank 0][FWD] layers.0.self_attention sum: 1234.56
             print(f"[Rank {rank}][{tag}] {name} sum: {val}", flush=True)
+
     # 3. 前向 Hook 定义
     def forward_wrapper(name):
         def forward_hook(module, input, output):
@@ -272,7 +279,9 @@ def register_debug_hooks(model_obj):
                     calc_and_print(item, f"{name}.output[{i}]", "FWD")
             else:
                 calc_and_print(output, f"{name}.output", "FWD")
+
         return forward_hook
+
     # 4. 反向 Hook 定义 (使用 register_full_backward_hook)
     def backward_wrapper(name):
         def backward_hook(module, grad_input, grad_output):
@@ -288,7 +297,9 @@ def register_debug_hooks(model_obj):
                     calc_and_print(g, f"{name}.grad_input[{i}]", "BWD")
             else:
                 calc_and_print(grad_input, f"{name}.grad_input", "BWD")
+
         return backward_hook
+
     # 5. 开始注册
     # 兼容 list 结构
     actual_module = model_obj[0] if isinstance(model_obj, list) else model_obj
@@ -306,6 +317,8 @@ def register_debug_hooks(model_obj):
         handle_fwd = module.register_forward_hook(forward_wrapper(name))
         # 注册 BWD Hook
         handle_bwd = module.register_full_backward_hook(backward_wrapper(name))
+
+
 def remove_debug_hooks_force(model_obj):
     """
     暴力清除模型中所有的 hook，不需要 handle。
@@ -322,8 +335,6 @@ def remove_debug_hooks_force(model_obj):
     print("Hooks force removed.", flush=True)
 
 
-
-
 # Commented out: using accelerate's set_seed instead
 # def set_seed(seed: int):
 #     np.random.seed(seed)
@@ -336,6 +347,7 @@ def remove_debug_hooks_force(model_obj):
 #     torch.backends.cudnn.benchmark = True
 #     torch.backends.cudnn.deterministic = True
 #     torch.backends.cuda.matmul.allow_tf32 = True
+
 
 def set_seed(seed: int):
     """Wrapper around accelerate's set_seed with additional cudnn settings."""
@@ -354,8 +366,21 @@ def set_seed(seed: int):
 #     return local_rank
 
 # Initialize Accelerator at module level (matching starVLA)
+use_deepspeed = os.environ.get("USE_DEEPSPEED", "true").lower() == "true"
 ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+if use_deepspeed:
+    ds_config_path = os.environ.get("DS_CONFIG", None)
+    deepspeed_plugin = (
+        DeepSpeedPlugin(hf_ds_config=ds_config_path)
+        if ds_config_path
+        else DeepSpeedPlugin(
+            zero_stage=2,
+            gradient_clipping=1.0,
+        )
+    )
+    accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin, kwargs_handlers=[ddp_kwargs])
+else:
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
 
 
 # TODO: (yupu) Re-enable wandb
@@ -449,7 +474,9 @@ def make_dataset(cfg: DataConfig):
     return dataset
 
 
-def resolve_delta_timestamps(cfg: DataConfig, ds_meta: LeRobotDatasetMetadata) -> dict[str, list] | None:
+def resolve_delta_timestamps(
+    cfg: DataConfig, ds_meta: LeRobotDatasetMetadata
+) -> dict[str, list] | None:
     """Resolves delta_timestamps by reading from the 'delta_indices' properties of the PreTrainedConfig.
 
     Args:
@@ -598,9 +625,7 @@ def make_policy(
         for key, ft in features.items()
         if ft.type == FeatureType.ACTION
     }
-    input_features = {
-        key: ft for key, ft in features.items() if key not in output_features
-    }
+    input_features = {key: ft for key, ft in features.items() if key not in output_features}
     # kwargs["config"] = config.model
 
     # PI0 finetuning, so always load a pretrained policy.
@@ -611,7 +636,9 @@ def make_policy(
 
     # TODO: (yupu) This is a hack, we should find a better way to handle this. LeRobot does this in the policy config.
     # The order of the images is defined in the dataset config.json
-    image_features = {key: ft for key, ft in input_features.items() if ft.type is FeatureType.VISUAL}
+    image_features = {
+        key: ft for key, ft in input_features.items() if ft.type is FeatureType.VISUAL
+    }
     config.data.vla_data.image_features = image_features
 
     policy = QwenGr00t(config=config)
@@ -678,12 +705,12 @@ def make_preprocessor_from_config(
             "name": "policy_preprocessor",
             "steps": [
                 {"registry_name": "device_processor", "config": {"device": "cpu"}},
-                {"registry_name": "normalizer_processor", "config": {"eps": 1e-8}}
-            ]
+                {"registry_name": "normalizer_processor", "config": {"eps": 1e-8}},
+            ],
         }
         overrides = {
             "device_processor": {"device": "cuda"},
-            "normalizer_processor": {"stats": dataset.meta.stats, "features": {...}}
+            "normalizer_processor": {"stats": dataset.meta.stats, "features": {...}},
         }
         preprocessor = make_preprocessor_from_config(config, overrides=overrides)
         # device_processor will use device="cuda" (overridden)
@@ -695,7 +722,7 @@ def make_preprocessor_from_config(
         steps = [
             "rename_observations_processor",
             "device_processor",
-            {"normalizer_processor": {"eps": 1e-8}}
+            {"normalizer_processor": {"eps": 1e-8}},
         ]
         preprocessor = make_preprocessor_from_config(steps)
         ```
@@ -720,9 +747,7 @@ def make_preprocessor_from_config(
         step_configs = config
         pipeline_name = "policy_preprocessor"
     else:
-        raise ValueError(
-            f"Config must be a dict with 'steps' key or a list, got {type(config)}"
-        )
+        raise ValueError(f"Config must be a dict with 'steps' key or a list, got {type(config)}")
 
     steps = []
     for step_entry in step_configs:
@@ -905,7 +930,8 @@ def update_policy(
         policy_model.update()
 
     train_metrics.loss = loss.item()
-    train_metrics.grad_norm = grad_norm.item() if grad_norm is not None else 0.0
+    train_metrics.grad_norm = grad_norm
+    # train_metrics.grad_norm = grad_norm.item() if grad_norm is not None else 0.0
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
 
@@ -965,13 +991,17 @@ def main(config: TrainConfig, seed: int):
     # debugpy.breakpoint()
 
     set_seed(seed)
-    print(f"[DEBUG RNG main] After set_seed: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
+    print(
+        f"[DEBUG RNG main] After set_seed: torch state[:10] = {torch.get_rng_state()[:10].tolist()}"
+    )
 
     # Use accelerator instead of manual DDP (matching starVLA)
     device = accelerator.device
     is_main_process = accelerator.is_main_process
     accelerator.print(accelerator.state)
-    print(f"[DEBUG RNG main] After accelerator setup: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
+    print(
+        f"[DEBUG RNG main] After accelerator setup: torch state[:10] = {torch.get_rng_state()[:10].tolist()}"
+    )
 
     # Commented out: old manual DDP initialization
     # local_rank = init_ddp()
@@ -981,7 +1011,9 @@ def main(config: TrainConfig, seed: int):
     # print(f"[DEBUG RNG main] After init_ddp: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
 
     dataset = make_dataset(config.data)
-    print(f"[DEBUG RNG main] After make_dataset: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
+    print(
+        f"[DEBUG RNG main] After make_dataset: torch state[:10] = {torch.get_rng_state()[:10].tolist()}"
+    )
 
     accelerator.wait_for_everyone()  # Use accelerator instead of dist.barrier()
 
@@ -1009,12 +1041,12 @@ def main(config: TrainConfig, seed: int):
             "features": {
                 **input_features,
                 **output_features,
-            }
+            },
         },
         # "tokenizer_processor": {"tokenizer_name": config.model.tokenizer_path},
     }
 
-    num_workers = 0 # config.system.num_workers
+    num_workers = 0  # config.system.num_workers
     shuffle = config.system.shuffle
 
     # # Wrap dataset with StarVLAFormatDataset for starVLA-compatible output format
@@ -1056,8 +1088,24 @@ def main(config: TrainConfig, seed: int):
     preprocessor = None
     if config.data.preprocessor is not None:
         preprocessor = make_preprocessor_from_config(
-            config.data.preprocessor,
-            overrides=preprocessor_overrides
+            config.data.preprocessor, overrides=preprocessor_overrides
+        )
+
+    # Setup postprocessor (unnormalization for inference)
+    postprocessor = None
+    postprocessor_config = getattr(config.data, "postprocessor", None)
+    if postprocessor_config is not None:
+        postprocessor_overrides = {
+            "unnormalizer_processor": {
+                "stats": dataset.meta.stats,
+                "features": {
+                    **input_features,
+                    **output_features,
+                },
+            },
+        }
+        postprocessor = make_preprocessor_from_config(
+            postprocessor_config, overrides=postprocessor_overrides
         )
 
     # Setup optimizer and scheduler (applies freeze config before accelerator.prepare)
@@ -1108,6 +1156,12 @@ def main(config: TrainConfig, seed: int):
     samples_per_epoch = len(dataset) // effective_batch_size
     sampler.set_epoch(epoch)
 
+    action_stats = dataset.meta.stats.get("action", {})
+    if is_main_process:
+        print(f"[DEBUG GRIPPER] action stats min: {action_stats.get('min', 'N/A')}")
+        print(f"[DEBUG GRIPPER] action stats max: {action_stats.get('max', 'N/A')}")
+    _debug_dumped = False
+
     for _ in range(step, config.system.train_steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
@@ -1115,16 +1169,27 @@ def main(config: TrainConfig, seed: int):
             k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
             for k, v in batch.items()
         }
-        # print(f"batch: {batch}")
 
-        # torch.save(batch, "batch_resized.pt")
-        # assert 0
+        if not _debug_dumped and is_main_process and "action" in batch:
+            print(
+                f"[DEBUG GRIPPER] BEFORE preproc action[0,0,:]: {batch['action'][0, 0, :].tolist()}"
+            )
+            print(
+                f"[DEBUG GRIPPER] BEFORE preproc action[:,:,6] (gripper): {batch['action'][:, :, 6].flatten()[:16].tolist()}"
+            )
 
         if preprocessor is not None:
             batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
-        # print(f"batch: {batch}")
+        if not _debug_dumped and is_main_process and "action" in batch:
+            print(
+                f"[DEBUG GRIPPER] AFTER preproc action[0,0,:]: {batch['action'][0, 0, :].tolist()}"
+            )
+            print(
+                f"[DEBUG GRIPPER] AFTER preproc action[:,:,6] (gripper): {batch['action'][:, :, 6].flatten()[:16].tolist()}"
+            )
+            _debug_dumped = True
 
         st = time.perf_counter()
         train_tracker = update_policy(
@@ -1161,6 +1226,7 @@ def main(config: TrainConfig, seed: int):
 
             if is_main_process:
                 from pathlib import Path
+
                 logger.info(f"Saving checkpoint at step {step}")
                 output_dir = Path(config.system.checkpoint.output_directory)
                 checkpoint_dir = get_step_checkpoint_dir(
@@ -1173,6 +1239,7 @@ def main(config: TrainConfig, seed: int):
                     policy=policy_to_save,
                     config=config,
                     preprocessor=preprocessor,
+                    postprocessor=postprocessor,
                 )
                 update_last_checkpoint(checkpoint_dir)
 
