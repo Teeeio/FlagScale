@@ -1,5 +1,7 @@
+import numpy as np
 import torch
 import torch.nn as nn
+from PIL import Image
 from transformers import (
     AutoProcessor,
     PretrainedConfig,
@@ -9,6 +11,21 @@ from transformers import (
 
 from flagscale.train.train_config import TrainConfig
 from flagscale.train.utils.image_tools import to_pil_preserve
+
+
+def _to_pil(img):
+    """Convert a single image (tensor, numpy, or PIL) to PIL.Image."""
+    if isinstance(img, Image.Image):
+        return img
+    if isinstance(img, torch.Tensor):
+        img = img.detach().cpu().numpy()
+    if isinstance(img, np.ndarray):
+        if img.dtype == np.uint8:
+            return Image.fromarray(img)
+        # float [0,1] → uint8
+        return Image.fromarray((img * 255).clip(0, 255).astype(np.uint8))
+    return img
+
 
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = 151655

@@ -451,6 +451,16 @@ def make_dataset(cfg: DataConfig):
         output = torch.stack(resized_frames, dim=0)
         return output[0] if is_single else output
 
+    def _resize_to_uint8_hwc(frame: torch.Tensor) -> torch.Tensor:
+        """float32 CHW [0,1] from torchcodec → uint8 HWC 224x224 via PIL resize."""
+        from PIL import Image
+        import numpy as np
+
+        frame_uint8 = (frame.permute(1, 2, 0) * 255).round().clamp(0, 255).to(torch.uint8)
+        # PIL default is BICUBIC, matching starVLA's Image.fromarray(image).resize((224, 224))
+        pil = Image.fromarray(frame_uint8.cpu().numpy()).resize((224, 224))
+        return torch.from_numpy(np.array(pil))
+
     image_transforms = _resize_like_starvla
     # Leave the revision to None
     ds_meta = LeRobotDatasetMetadata(root=cfg.data_path, revision=None)
