@@ -115,11 +115,6 @@ class StarVLAFormatDataset(TorchDataset):
         if self.action_max is not None and hasattr(self.action_max, "numpy"):
             self.action_max = self.action_max.numpy()
 
-        # Debug: print stats
-        print(f"[StarVLAFormatDataset] action_min: {self.action_min}")
-        print(f"[StarVLAFormatDataset] action_max: {self.action_max}")
-        self._debug_count = 0  # Counter for debug prints
-
     def __len__(self):
         return len(self.dataset)
 
@@ -168,19 +163,6 @@ class StarVLAFormatDataset(TorchDataset):
         if isinstance(action, torch.Tensor):
             action = action.detach().cpu().numpy()
 
-        # Debug: print raw action values (only first few samples)
-        if self._debug_count < 16:
-            traj_id = item.get("episode_index", -1)
-            if isinstance(traj_id, torch.Tensor):
-                traj_id = traj_id.item()
-            frame_idx = item.get("index", idx)
-            if isinstance(frame_idx, torch.Tensor):
-                frame_idx = frame_idx.item()
-            print(
-                f"[StarVLAFormatDataset] idx={idx} traj={traj_id} frame={frame_idx} RAW action[0,:5]: {action[0, :5].tolist()}"
-            )
-            print(f"[StarVLAFormatDataset] idx={idx} RAW action sum: {action.sum():.4f}")
-
         # Apply min_max normalization (matching starVLA's Libero4in1DataConfig exactly)
         # starVLA only normalizes action.x, y, z, roll, pitch, yaw (indices 0-5)
         # action.gripper (index 6) is NOT normalized
@@ -202,12 +184,6 @@ class StarVLAFormatDataset(TorchDataset):
                     normalized[..., i] = 0.0
             # Keep dimension 6 (gripper) as-is (no normalization)
             action = normalized
-
-        # Debug: print normalized action values (only first few samples)
-        if self._debug_count < 16:
-            print(f"[StarVLAFormatDataset] idx={idx} NORM action[0,:5]: {action[0, :5].tolist()}")
-            print(f"[StarVLAFormatDataset] idx={idx} NORM action sum: {action.sum():.4f}")
-            self._debug_count += 1
 
         action = action.astype(np.float16)
 
@@ -461,7 +437,7 @@ def make_dataset(cfg: DataConfig):
         pil = Image.fromarray(frame_uint8.cpu().numpy()).resize((224, 224))
         return torch.from_numpy(np.array(pil))
 
-    image_transforms = _resize_like_starvla
+    image_transforms = _resize_to_uint8_hwc
     # Leave the revision to None
     ds_meta = LeRobotDatasetMetadata(root=cfg.data_path, revision=None)
     delta_timestamps = resolve_delta_timestamps(cfg, ds_meta)
@@ -1166,12 +1142,6 @@ def main(config: TrainConfig, seed: int):
     samples_per_epoch = len(dataset) // effective_batch_size
     sampler.set_epoch(epoch)
 
-    action_stats = dataset.meta.stats.get("action", {})
-    if is_main_process:
-        print(f"[DEBUG GRIPPER] action stats min: {action_stats.get('min', 'N/A')}")
-        print(f"[DEBUG GRIPPER] action stats max: {action_stats.get('max', 'N/A')}")
-    _debug_dumped = False
-
     for _ in range(step, config.system.train_steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
@@ -1180,26 +1150,9 @@ def main(config: TrainConfig, seed: int):
             for k, v in batch.items()
         }
 
-        if not _debug_dumped and is_main_process and "action" in batch:
-            print(
-                f"[DEBUG GRIPPER] BEFORE preproc action[0,0,:]: {batch['action'][0, 0, :].tolist()}"
-            )
-            print(
-                f"[DEBUG GRIPPER] BEFORE preproc action[:,:,6] (gripper): {batch['action'][:, :, 6].flatten()[:16].tolist()}"
-            )
-
         if preprocessor is not None:
             batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
-
-        if not _debug_dumped and is_main_process and "action" in batch:
-            print(
-                f"[DEBUG GRIPPER] AFTER preproc action[0,0,:]: {batch['action'][0, 0, :].tolist()}"
-            )
-            print(
-                f"[DEBUG GRIPPER] AFTER preproc action[:,:,6] (gripper): {batch['action'][:, :, 6].flatten()[:16].tolist()}"
-            )
-            _debug_dumped = True
 
         st = time.perf_counter()
         train_tracker = update_policy(

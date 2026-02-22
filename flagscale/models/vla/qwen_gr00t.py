@@ -38,14 +38,8 @@ class QwenGr00t(PreTrainedModel):
         super().__init__(PretrainedConfig())
         self._config = config
 
-        # DEBUG: Track random state before VLM creation
-        print(f"[DEBUG RNG] Before VLM: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
-
         vlm_type = config.model.vlm.get("type", "qwen3-vl")
         self.vlm = build_vlm(vlm_type, config=config)
-
-        # DEBUG: Track random state after VLM creation
-        print(f"[DEBUG RNG] After VLM: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
 
         action_model_type = config.model.action_model.get("type", "flow_matching")
         self.action_model = build_action_model(
@@ -84,25 +78,11 @@ class QwenGr00t(PreTrainedModel):
         # NOTE: (yupu) The order of the images differs from starVLA, which is [image, wrist_image]
         qwen_inputs = self.vlm.prepare_input(examples)
 
-        # DEBUG: Print qwen_inputs stats
-        # print(f"[DEBUG] qwen_inputs keys: {qwen_inputs.keys()}")
-        # print(f"[DEBUG] input_ids shape: {qwen_inputs['input_ids'].shape}")
-        # print(f"[DEBUG] input_ids sum: {qwen_inputs['input_ids'].sum().item()}")
-
-        # qwen_inputs = torch.load("/share/project/fengyupu/github/starVLA/qwen_inputs_debug.pt", weights_only=False)
-        # torch.testing.assert_close(qwen_inputs, qwen_inputs_debug)
-
-        # torch.save(qwen_inputs, "qwen_inputs.pt")
-
         # TODO: (yupu) Hard-coded autocast and dtype, matches starVLA
         with torch.autocast("cuda", dtype=torch.bfloat16):
             vlm_output = self.vlm.forward(qwen_inputs, output_attentions=False)
             # last_hidden_state: [B, seq_len, H]
             last_hidden = vlm_output["hidden_states"][-1]  # [B, L, H]
-            # print(f"[DEBUG] last_hidden shape: {last_hidden.shape}, dtype: {last_hidden.dtype}")
-            # print(
-            #     f"[DEBUG] last_hidden norm: {last_hidden.norm().item():.4f}, mean: {last_hidden.mean().item():.6f}, std: {last_hidden.std().item():.6f}"
-            # )
 
         # Step 4: Action Expert Forward and Loss
         with torch.autocast("cuda", dtype=torch.float32):
@@ -123,16 +103,8 @@ class QwenGr00t(PreTrainedModel):
                 "repeated_diffusion_steps", 4
             )
 
-            # print(f"[DEBUG] actions_target shape before repeat: {actions_target.shape}")
-            # print(f"[DEBUG] actions_target sum: {actions_target.sum().item():.4f}")
-            # print(f"[DEBUG] actions_target[0,0,:5]: {actions_target[0, 0, :5].tolist()}")
-            # print(f"[DEBUG] repeated_diffusion_steps: {repeated_diffusion_steps}")
-
             actions_repeated = actions_target.repeat(repeated_diffusion_steps, 1, 1)
             last_hidden_repeated = last_hidden.repeat(repeated_diffusion_steps, 1, 1)
-
-            # print(f"[DEBUG] actions_repeated shape: {actions_repeated.shape}")
-            # print(f"[DEBUG] last_hidden_repeated shape: {last_hidden_repeated.shape}")
 
             state_repeated = None
             if state is not None:

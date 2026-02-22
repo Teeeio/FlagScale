@@ -139,7 +139,10 @@ class Qwen25VLBackbone(QwenVLBackbone):
 
             batch_images = None
             for key in image_keys:
-                key_images = _tensor_to_pil_list(examples[key])
+                imgs = examples[key]
+                if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
+                    imgs = [imgs]
+                key_images = [_to_pil(img) for img in imgs]
                 if batch_images is None:
                     batch_images = [[img] for img in key_images]
                 else:
@@ -290,7 +293,10 @@ class Qwen3VLBackbone(QwenVLBackbone):
 
             batch_images = None
             for key in image_keys:
-                key_images = _tensor_to_pil_list(examples[key])
+                imgs = examples[key]
+                if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
+                    imgs = [imgs]
+                key_images = [_to_pil(img) for img in imgs]
                 if batch_images is None:
                     batch_images = [[img] for img in key_images]
                 else:

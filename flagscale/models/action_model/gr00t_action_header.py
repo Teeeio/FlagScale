@@ -313,34 +313,18 @@ class FlowmatchingActionHead(nn.Module):
                 f"(from config), but received actions with {actions.shape[-1]} dimensions. "
                 f"Please update config.model.action_model.action_dim to match your data."
             )
-        # # DEBUG: deterministic timesteps for alignment verification
-        # torch.manual_seed(42)
-        # torch.cuda.manual_seed(42)
-
-        # DEBUG: Print input shapes and stats
-        print(f"[ACTION HEAD] vl_embs shape: {vl_embs.shape}, norm: {vl_embs.norm().item():.4f}")
-        print(f"[ACTION HEAD] actions shape: {actions.shape}, norm: {actions.norm().item():.4f}")
-
         # Embed noised action trajectory.
         noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
 
         t = self.sample_time(actions.shape[0], device=actions.device, dtype=actions.dtype)
         t = t[:, None, None]  # shape (B,1,1) for broadcast
 
-        print(f"[ACTION HEAD] noise norm: {noise.norm().item():.4f}, t[0]: {t[0, 0, 0].item():.6f}")
-        print(f"[ACTION HEAD] noise[0,0,:3]: {noise[0, 0, :3].tolist()}")
-        print(f"[ACTION HEAD] t[:4]: {t[:4, 0, 0].tolist()}")
-
         noisy_trajectory = (1 - t) * noise + t * actions
         velocity = actions - noise
-
-        print(f"[ACTION HEAD] noisy_trajectory norm: {noisy_trajectory.norm().item():.4f}")
-        print(f"[ACTION HEAD] velocity norm: {velocity.norm().item():.4f}")
 
         # Convert (continuous) t -> discrete if needed
         t_discretized = (t[:, 0, 0] * self.num_timestep_buckets).long()
         action_features = self.action_encoder(noisy_trajectory, t_discretized)
-        print(f"[ACTION HEAD] action_features norm: {action_features.norm().item():.4f}")
 
         # embed state
         state_features = self.state_encoder(state) if state is not None else None
@@ -359,8 +343,6 @@ class FlowmatchingActionHead(nn.Module):
             else torch.cat((future_tokens, action_features), dim=1)
         )
 
-        # Join VLM features with state and action embedding along sequence dimension.
-        print(f"[ACTION HEAD] sa_embs shape: {sa_embs.shape}, norm: {sa_embs.norm().item():.4f}")
         model_output = self.model(
             hidden_states=sa_embs,
             encoder_hidden_states=vl_embs,
@@ -368,16 +350,11 @@ class FlowmatchingActionHead(nn.Module):
             timestep=t_discretized,
             return_all_hidden_states=False,  # NOTE (YL): not using flare now
         )
-        print(f"[ACTION HEAD] model_output norm: {model_output.norm().item():.4f}")
         pred = self.action_decoder(model_output)
         pred_actions = pred[:, -actions.shape[1] :]
 
-        print(f"[ACTION HEAD] pred_actions norm: {pred_actions.norm().item():.4f}")
-        print(f"[ACTION HEAD] pred_actions[0,0,:5]: {pred_actions[0, 0, :5].tolist()}")
-
         # Slice out only the action portion of pred and target.
         loss = ((pred_actions - velocity) ** 2).mean()
-        print(f"[ACTION HEAD] loss: {loss.item():.6f}")
         return loss
 
     @torch.no_grad()
