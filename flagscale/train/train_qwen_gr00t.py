@@ -7,23 +7,16 @@ import random
 import time
 from collections.abc import Iterator
 from contextlib import nullcontext
-from typing import Any, TypedDict
-
-try:
-    from typing import Unpack  # Python 3.11+
-except ImportError:
-    from typing_extensions import Unpack  # Python < 3.11
+from typing import Any
 
 from omegaconf import OmegaConf, DictConfig
 import numpy as np
 import torch
 import torch.distributed as dist
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from torch.optim import Optimizer
-# from torch.nn.parallel import DistributedDataParallel as DDP  # Commented out: using accelerate instead
-
-# Accelerate for distributed training (matching starVLA)
-from accelerate import Accelerator, DeepSpeedPlugin
-from accelerate.utils import DistributedDataParallelKwargs, set_seed as accelerate_set_seed
 
 from flagscale.runner.utils import logger
 from flagscale.train.train_config import TrainConfig, DataConfig
@@ -33,17 +26,7 @@ from flagscale.train.datasets.lerobot_dataset import (
     LeRobotDatasetMetadata,
 )
 from flagscale.train.datasets.utils import dataset_to_policy_features
-from flagscale.train.processor import PolicyAction, PolicyProcessorPipeline
-from flagscale.train.processor.converters import (
-    batch_to_transition,
-    policy_action_to_transition,
-    transition_to_batch,
-    transition_to_policy_action,
-)
-from flagscale.models.utils.constants import (
-    POLICY_POSTPROCESSOR_DEFAULT_NAME,
-    POLICY_PREPROCESSOR_DEFAULT_NAME,
-)
+from flagscale.train.processor import PolicyProcessorPipeline
 from flagscale.models.configs.types import PolicyFeature
 from flagscale.models.utils.constants import ACTION, OBS_PREFIX, REWARD
 from flagscale.models.configs.types import FeatureType
@@ -311,74 +294,59 @@ def remove_debug_hooks_force(model_obj):
     print("Hooks force removed.", flush=True)
 
 
-# Commented out: using accelerate's set_seed instead
-# def set_seed(seed: int):
-#     np.random.seed(seed)
-#     random.seed(seed)
-#     torch.manual_seed(seed)
-#     if torch.cuda.is_available():
-#         torch.cuda.manual_seed_all(seed)
-#
-#     torch.backends.cudnn.enabled = True
-#     torch.backends.cudnn.benchmark = True
-#     torch.backends.cudnn.deterministic = True
-#     torch.backends.cuda.matmul.allow_tf32 = True
 
 
 def set_seed(seed: int):
-    """Wrapper around accelerate's set_seed with additional cudnn settings."""
-    accelerate_set_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = False
     torch.backends.cuda.matmul.allow_tf32 = False
 
 
-# Commented out: using accelerate instead of manual DDP
-# def init_ddp():
-#     local_rank = int(os.environ["LOCAL_RANK"])
-#     torch.cuda.set_device(local_rank)
-#     torch.distributed.init_process_group(backend="nccl", init_method="env://")
-#     return local_rank
+def apply_fsdp2(policy, device_mesh):
+    """Apply FSDP2 sharding to QwenGr00t.
 
-# Initialize Accelerator at module level (matching starVLA)
-use_deepspeed = os.environ.get("USE_DEEPSPEED", "true").lower() == "true"
-ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-if use_deepspeed:
-    ds_config_path = os.environ.get("DS_CONFIG", None)
-    deepspeed_plugin = (
-        DeepSpeedPlugin(hf_ds_config=ds_config_path)
-        if ds_config_path
-        else DeepSpeedPlugin(
-            zero_stage=2,
-            gradient_clipping=1.0,
-        )
-    )
-    accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin, kwargs_handlers=[ddp_kwargs])
-else:
-    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+    Uses different MixedPrecisionPolicy per component to match starVLA:
+    - VLM blocks: param_dtype=bf16 (starVLA loads VLM in bf16)
+    - DiT blocks: no param_dtype (starVLA keeps action model in fp32)
+    - Root: no param_dtype (remaining params stay fp32, autocast handles compute dtype)
+    """
+    # Cast everything to fp32 first so the root param group has uniform dtype.
+    # MixedPrecisionPolicy(param_dtype=bf16) on VLM blocks will cast them to
+    # bf16 for forward compute, matching starVLA's bf16-loaded VLM.
+    policy = policy.float()
 
+    mp_vlm = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32)
+    mp_action = MixedPrecisionPolicy(reduce_dtype=torch.float32)
+    vlm_config = {"mesh": device_mesh, "mp_policy": mp_vlm}
+    action_config = {"mesh": device_mesh, "mp_policy": mp_action}
 
-# TODO: (yupu) Re-enable wandb
-# def init_wandb(config, *, resuming: bool, log_code: bool = False, enabled: bool = True):
-#     if not enabled:
-#         wandb.init(mode="disabled")
-#         return
+    vlm_model = policy.vlm.model  # Qwen3VLForConditionalGeneration
 
-#     ckpt_dir = pathlib.Path(config.checkpoint_dir)
-#     if not ckpt_dir.exists():
-#         raise FileNotFoundError(f"Checkpoint directory {ckpt_dir} does not exist.")
-#     if resuming:
-#         run_id = (ckpt_dir / "wandb_id.txt").read_text().strip()
-#         wandb.init(id=run_id, resume="must", project=config.project_name)
-#     else:
-#         wandb.init(
-#             name=config.exp_name, config=vars(config), project=config.project_name
-#         )
-#         (ckpt_dir / "wandb_id.txt").write_text(wandb.run.id)
+    # reshard_after_forward=False keeps params unsharded during forward+backward
+    # (only reshards between iterations). Closer to ZeRO-2 speed at higher memory.
+    reshard = False
 
-#     if log_code:
-#         wandb.run.log_code(epath.Path(__file__).parent.parent)
+    # --- Vision encoder blocks (bf16 compute) ---
+    for block in vlm_model.model.visual.blocks:
+        fully_shard(block, **vlm_config, reshard_after_forward=reshard)
+
+    # --- LLM decoder layers (bf16 compute) ---
+    for layer in vlm_model.model.language_model.layers:
+        fully_shard(layer, **vlm_config, reshard_after_forward=reshard)
+
+    # --- DiT action head blocks (fp32 compute) ---
+    dit = policy.action_model._head.model
+    for block in dit.transformer_blocks:
+        fully_shard(block, **action_config, reshard_after_forward=reshard)
+
+    # --- Root: all remaining params are fp32, no param_dtype cast ---
+    fully_shard(policy, **action_config)
 
 
 def make_dataset(cfg: DataConfig):
@@ -628,36 +596,9 @@ def make_policy(
     config.data.vla_data.image_features = image_features
 
     policy = QwenGr00t(config=config)
-    # policy = Qwen_PI(config=config)
-    print(policy)
-    print(f"config: {config}")
-
-    # FIXME
     policy.to("cuda")
 
     return policy, input_features, output_features
-
-
-class ProcessorConfigKwargs(TypedDict, total=False):
-    """
-    A TypedDict defining the keyword arguments for processor configuration.
-
-    This provides type hints for the optional arguments passed to `make_pre_post_processors`,
-    improving code clarity and enabling static analysis.
-
-    Attributes:
-        preprocessor_config_filename: The filename for the preprocessor configuration.
-        postprocessor_config_filename: The filename for the postprocessor configuration.
-        preprocessor_overrides: A dictionary of overrides for the preprocessor configuration.
-        postprocessor_overrides: A dictionary of overrides for the postprocessor configuration.
-        dataset_stats: Dataset statistics for normalization.
-    """
-
-    preprocessor_config_filename: str | None
-    postprocessor_config_filename: str | None
-    preprocessor_overrides: dict[str, Any] | None
-    postprocessor_overrides: dict[str, Any] | None
-    dataset_stats: dict[str, dict[str, torch.Tensor]] | None
 
 
 def make_preprocessor_from_config(
@@ -788,59 +729,6 @@ def make_preprocessor_from_config(
     )
 
 
-def make_pre_post_processors(
-    pretrained_path: str | None = None,
-    **kwargs: Unpack[ProcessorConfigKwargs],
-) -> tuple[
-    PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
-    PolicyProcessorPipeline[PolicyAction, PolicyAction],
-]:
-    """
-    Create or load pre- and post-processor pipelines for a given policy.
-
-    This function acts as a factory. It can either load existing processor pipelines
-    from a pretrained path or create new ones from scratch based on the policy
-    configuration. Each policy type has a dedicated factory function for its
-    processors (e.g., `make_tdmpc_pre_post_processors`).
-
-    Args:
-        policy_cfg: The configuration of the policy for which to create processors.
-        pretrained_path: An optional path to load pretrained processor pipelines from.
-            If provided, pipelines are loaded from this path.
-        **kwargs: Keyword arguments for processor configuration, as defined in
-            `ProcessorConfigKwargs`.
-
-    Returns:
-        A tuple containing the input (pre-processor) and output (post-processor) pipelines.
-
-    Raises:
-        NotImplementedError: If a processor factory is not implemented for the given
-            policy configuration type.
-    """
-    return (
-        PolicyProcessorPipeline.from_pretrained(
-            pretrained_model_name_or_path=pretrained_path,
-            config_filename=kwargs.get(
-                "preprocessor_config_filename",
-                f"{POLICY_PREPROCESSOR_DEFAULT_NAME}.json",
-            ),
-            overrides=kwargs.get("preprocessor_overrides", {}),
-            to_transition=batch_to_transition,
-            to_output=transition_to_batch,
-        ),
-        PolicyProcessorPipeline.from_pretrained(
-            pretrained_model_name_or_path=pretrained_path,
-            config_filename=kwargs.get(
-                "postprocessor_config_filename",
-                f"{POLICY_POSTPROCESSOR_DEFAULT_NAME}.json",
-            ),
-            overrides=kwargs.get("postprocessor_overrides", {}),
-            to_transition=policy_action_to_transition,
-            to_output=transition_to_policy_action,
-        ),
-    )
-
-
 def has_method(cls: object, method_name: str) -> bool:
     return hasattr(cls, method_name) and callable(getattr(cls, method_name))
 
@@ -854,172 +742,85 @@ def update_policy(
     grad_clip_norm: float,
     lr_scheduler=None,
     lock=None,
-) -> tuple[MetricsTracker, dict]:
+) -> MetricsTracker:
     """
     Performs a single training step to update the policy's weights.
 
     This function executes the forward and backward passes, clips gradients, and steps the optimizer and
-    learning rate scheduler. Uses accelerate for distributed training (matching starVLA).
+    learning rate scheduler.
 
     Args:
         train_metrics: A MetricsTracker instance to record training statistics.
-        policy: The policy model to be trained (wrapped by accelerator).
+        policy: The policy model to be trained (FSDP2-sharded).
         batch: A batch of training data.
         optimizer: The optimizer used to update the policy's parameters.
+        use_amp: Whether to use automatic mixed precision.
         grad_clip_norm: The maximum norm for gradient clipping.
         lr_scheduler: An optional learning rate scheduler.
         lock: An optional lock for thread-safe optimizer updates.
 
     Returns:
-        A tuple containing:
-        - The updated MetricsTracker with new statistics for this step.
-        - A dictionary of outputs from the policy's forward pass, for logging purposes.
+        The updated MetricsTracker with new statistics for this step.
     """
     start_time = time.perf_counter()
 
-    # Get the policy model (unwrap accelerator if needed) to access config
-    policy_model = accelerator.unwrap_model(policy)
+    optimizer.zero_grad()
 
-    print(f"use_amp: {use_amp}")
+    autocast_context = (
+        torch.amp.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
+    )
+    with autocast_context:
+        loss = policy(batch)
 
-    # Use accelerator.accumulate for gradient accumulation support (matching starVLA)
-    with accelerator.accumulate(policy):
-        optimizer.zero_grad()
+    loss.backward()
 
-        autocast_context = (
-            torch.amp.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
-        )
+    # Clip gradients (torch.nn.utils.clip_grad_norm_ works with DTensors in PyTorch ≥2.6)
+    grad_norm = torch.nn.utils.clip_grad_norm_(
+        policy.parameters(), grad_clip_norm if grad_clip_norm > 0 else float("inf")
+    )
 
-        with autocast_context:
-            loss = policy.forward(batch)
+    with lock if lock is not None else nullcontext():
+        optimizer.step()
 
-        # Use accelerator.backward instead of loss.backward() (matching starVLA)
-        accelerator.backward(loss)
-
-        # Clip gradients using accelerator (matching starVLA)
-        grad_norm = None
-        if grad_clip_norm > 0:
-            grad_norm = accelerator.clip_grad_norm_(policy.parameters(), grad_clip_norm)
-        else:
-            # Compute grad norm even if not clipping
-            grad_norm = accelerator.clip_grad_norm_(policy.parameters(), float("inf"))
-
-        with lock if lock is not None else nullcontext():
-            optimizer.step()
-
-        # Step through pytorch scheduler at every batch instead of epoch
-        if lr_scheduler is not None:
-            lr_scheduler.step()
+    # Step through pytorch scheduler at every batch instead of epoch
+    if lr_scheduler is not None:
+        lr_scheduler.step()
 
     # Update internal buffers if policy has update method
-    if has_method(policy_model, "update"):
-        policy_model.update()
+    if has_method(policy, "update"):
+        policy.update()
 
     train_metrics.loss = loss.item()
-    train_metrics.grad_norm = grad_norm
-    # train_metrics.grad_norm = grad_norm.item() if grad_norm is not None else 0.0
+    train_metrics.grad_norm = grad_norm.full_tensor().item() if hasattr(grad_norm, 'full_tensor') else grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
 
     return train_metrics
 
 
-# Commented out: old update_policy using manual DDP
-# def update_policy_old(
-#     train_metrics: MetricsTracker,
-#     policy,
-#     batch: Any,
-#     optimizer: Optimizer,
-#     use_amp: bool,
-#     grad_clip_norm: float,
-#     lr_scheduler=None,
-#     lock=None,
-# ) -> tuple[MetricsTracker, dict]:
-#     start_time = time.perf_counter()
-#     policy_model = policy.module if isinstance(policy, DDP) else policy
-#     print(f"use_amp: {use_amp}")
-#     autocast_context = (
-#         torch.amp.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
-#     )
-#     with autocast_context:
-#         loss = policy.forward(batch)
-#     loss.backward()
-#     if grad_clip_norm > 0:
-#         grad_norm = torch.nn.utils.clip_grad_norm_(
-#             policy.module.parameters() if isinstance(policy, DDP) else policy.parameters(),
-#             grad_clip_norm,
-#         )
-#     else:
-#         grad_norm = torch.nn.utils.clip_grad_norm_(
-#             policy.module.parameters() if isinstance(policy, DDP) else policy.parameters(),
-#             float("inf"),
-#             error_if_nonfinite=False,
-#         )
-#     with lock if lock is not None else nullcontext():
-#         optimizer.step()
-#     optimizer.zero_grad()
-#     if lr_scheduler is not None:
-#         lr_scheduler.step()
-#     if has_method(policy_model, "update"):
-#         policy_model.update()
-#     train_metrics.loss = loss.item()
-#     train_metrics.grad_norm = grad_norm.item()
-#     train_metrics.lr = optimizer.param_groups[0]["lr"]
-#     train_metrics.update_s = time.perf_counter() - start_time
-#     return train_metrics
-
-
 def main(config: TrainConfig, seed: int):
-
-    # import debugpy
-    # debugpy.listen(("0.0.0.0", 9096))
-    # debugpy.wait_for_client()
-    # debugpy.breakpoint()
-
     set_seed(seed)
-    print(
-        f"[DEBUG RNG main] After set_seed: torch state[:10] = {torch.get_rng_state()[:10].tolist()}"
-    )
 
-    # Use accelerator instead of manual DDP (matching starVLA)
-    device = accelerator.device
-    is_main_process = accelerator.is_main_process
-    accelerator.print(accelerator.state)
-    print(
-        f"[DEBUG RNG main] After accelerator setup: torch state[:10] = {torch.get_rng_state()[:10].tolist()}"
-    )
-
-    # Commented out: old manual DDP initialization
-    # local_rank = init_ddp()
-    # device = torch.device("cuda", local_rank)
-    # rank = dist.get_rank()
-    # is_main_process = rank == 0 and local_rank == 0
-    # print(f"[DEBUG RNG main] After init_ddp: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
+    # --- Distributed init ---
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    is_main_process = rank == 0
 
     dataset = make_dataset(config.data)
-    print(
-        f"[DEBUG RNG main] After make_dataset: torch state[:10] = {torch.get_rng_state()[:10].tolist()}"
-    )
-
-    accelerator.wait_for_everyone()  # Use accelerator instead of dist.barrier()
-
-    # Reset seed before model creation to match starVLA initialization order
-    # (starVLA creates model before dataset, so we reset seed to get same weights)
-    # set_seed(seed)
-    # print(f"[DEBUG RNG main] After 2nd set_seed: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
+    dist.barrier()
 
     policy, input_features, output_features = make_policy(config=config, ds_meta=dataset.meta)
-    # register_debug_hooks(policy)
+    dist.barrier()
 
-    accelerator.wait_for_everyone()  # Use accelerator instead of dist.barrier()
+    # --- Apply FSDP2 ---
+    device_mesh = init_device_mesh("cuda", (world_size,))
+    apply_fsdp2(policy, device_mesh)
 
     # Create processors - only provide dataset_stats if not resuming from saved processors
-    processor_kwargs = {}
-    postprocessor_kwargs = {}
-    # Only provide dataset_stats when not resuming from saved processor state
-    processor_kwargs["dataset_stats"] = dataset.meta.stats
-
-    # Prepare overrides for preprocessor steps
     preprocessor_overrides = {
         "device_processor": {"device": device.type},
         "normalizer_processor": {
@@ -1029,37 +830,22 @@ def main(config: TrainConfig, seed: int):
                 **output_features,
             },
         },
-        # "tokenizer_processor": {"tokenizer_name": config.model.tokenizer_path},
     }
 
     num_workers = 0  # config.system.num_workers
     shuffle = config.system.shuffle
 
-    # # Wrap dataset with StarVLAFormatDataset for starVLA-compatible output format
-    # image_keys = getattr(config.data, "image_keys", None) or [
-    #     "observation.images.image",
-    #     "observation.images.wrist_image",
-    # ]
-    # starvla_dataset = StarVLAFormatDataset(
-    #     dataset,
-    #     image_keys=image_keys,
-    #     image_size=(224, 224),
-    # )
-
     # DistributedSampler ensures each rank gets different data
-    # Use accelerator's process info (matching starVLA pattern)
     sampler = torch.utils.data.distributed.DistributedSampler(
         dataset,
-        # starvla_dataset,
-        num_replicas=accelerator.num_processes,
-        rank=accelerator.process_index,
+        num_replicas=world_size,
+        rank=rank,
         shuffle=shuffle,
         drop_last=False,
     )
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        # starvla_dataset,
         num_workers=num_workers,
         batch_size=config.system.batch_size,
         shuffle=False,  # Must be False when using sampler
@@ -1067,7 +853,6 @@ def main(config: TrainConfig, seed: int):
         pin_memory=True,
         drop_last=False,
         prefetch_factor=2 if num_workers > 0 else None,
-        # collate_fn=collate_fn_starvla,  # Return batch as list of dicts (starVLA style)
     )
 
     # Setup preprocessor
@@ -1094,27 +879,12 @@ def main(config: TrainConfig, seed: int):
             postprocessor_config, overrides=postprocessor_overrides
         )
 
-    # Setup optimizer and scheduler (applies freeze config before accelerator.prepare)
+    # Setup optimizer and scheduler (applies freeze config internally)
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(policy, config)
 
-    # Use accelerator.prepare instead of manual DDP wrapping (matching starVLA)
-    # This handles DDP wrapping, moving to device, etc.
-    accelerator.dataloader_config.dispatch_batches = False  # Match starVLA setting
-    policy, optimizer, dataloader = accelerator.prepare(policy, optimizer, dataloader)
-
-    # Commented out: old manual DDP wrapping
-    # policy = DDP(
-    #     policy,
-    #     device_ids=[local_rank],
-    #     find_unused_parameters=True,
-    #     output_device=local_rank,
-    # )
-
-    accelerator.wait_for_everyone()  # Use accelerator instead of dist.barrier()
+    dist.barrier()
 
     dl_iter = cycle(dataloader)
-
-    # policy.train()
 
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),
@@ -1124,8 +894,7 @@ def main(config: TrainConfig, seed: int):
         "dataloading_s": AverageMeter("data_s", ":.3f"),
     }
 
-    # Use accelerator.num_processes instead of dist.get_world_size()
-    effective_batch_size = config.system.batch_size * accelerator.num_processes
+    effective_batch_size = config.system.batch_size * world_size
 
     step = 0
 
@@ -1137,7 +906,7 @@ def main(config: TrainConfig, seed: int):
         initial_step=step,
     )
 
-    # To ensures proper data shuffling across epochs in distributed training
+    # Ensures proper data shuffling across epochs in distributed training
     epoch = 0
     samples_per_epoch = len(dataset) // effective_batch_size
     sampler.set_epoch(epoch)
@@ -1154,7 +923,6 @@ def main(config: TrainConfig, seed: int):
             batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
-        st = time.perf_counter()
         train_tracker = update_policy(
             train_tracker,
             policy,
@@ -1164,8 +932,6 @@ def main(config: TrainConfig, seed: int):
             grad_clip_norm=config.system.grad_clip_norm,
             lr_scheduler=lr_scheduler,
         )
-        print(f"update_policy time: {time.perf_counter() - st}")
-        print(f"train_tracker at step {step}: {format_train_tracker_step(train_tracker)}")
 
         step += 1
         train_tracker.step()
@@ -1184,8 +950,11 @@ def main(config: TrainConfig, seed: int):
             config.system.checkpoint.save_checkpoint
             and step % config.system.checkpoint.save_freq == 0
         ):
-            # Synchronize all processes before checkpoint saving
-            accelerator.wait_for_everyone()
+            dist.barrier()
+
+            # get_model_state_dict is a collective — all ranks must call it
+            options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+            state_dict = get_model_state_dict(policy, options=options)
 
             if is_main_process:
                 from pathlib import Path
@@ -1195,27 +964,22 @@ def main(config: TrainConfig, seed: int):
                 checkpoint_dir = get_step_checkpoint_dir(
                     output_dir, config.system.train_steps, step
                 )
-                # Use accelerator.unwrap_model instead of policy.module
-                policy_to_save = accelerator.unwrap_model(policy)
                 save_checkpoint(
                     checkpoint_dir=checkpoint_dir,
-                    policy=policy_to_save,
+                    policy=state_dict,
                     config=config,
                     preprocessor=preprocessor,
                     postprocessor=postprocessor,
                 )
                 update_last_checkpoint(checkpoint_dir)
 
-            # Synchronize all processes after checkpoint saving
-            accelerator.wait_for_everyone()
+            dist.barrier()
 
     if is_main_process:
         logger.info("Training completed")
 
-    # Properly clean up using accelerator (matching starVLA)
-    accelerator.wait_for_everyone()
-    # Note: accelerator handles process group cleanup automatically
-    # dist.destroy_process_group()  # Commented out: handled by accelerator
+    dist.barrier()
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":

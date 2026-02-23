@@ -212,7 +212,9 @@ class Qwen25VLBackbone(QwenVLBackbone):
             labels[labels == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
             batch_input["labels"] = labels
 
-        return batch_input.to(self.model.device)
+        # Use current CUDA device instead of self.model.device, which returns
+        # a DTensor device under FSDP2 and causes mixed Tensor/DTensor errors.
+        return batch_input.to(f"cuda:{torch.cuda.current_device()}")
 
 
 class Qwen3VLBackbone(QwenVLBackbone):
@@ -369,4 +371,6 @@ class Qwen3VLBackbone(QwenVLBackbone):
             labels[labels == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
             batch_inputs["labels"] = labels
 
-        return batch_inputs.to(self.model.device)
+        # Use current CUDA device instead of self.model.device, which returns
+        # a DTensor device under FSDP2 and causes mixed Tensor/DTensor errors.
+        return batch_inputs.to(f"cuda:{torch.cuda.current_device()}")

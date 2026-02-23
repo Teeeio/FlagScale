@@ -3,7 +3,7 @@ defaults:
   - train: qwen_gr00t
 
 experiment:
-  exp_name: qwen_gr00t_train_zero2_norm_gripper_update_imagepre
+  exp_name: qwen_gr00t_train_fsdp
   seed: 42
   save_steps: 10000
   load: null

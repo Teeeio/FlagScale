@@ -51,23 +51,6 @@ class QwenGr00t(PreTrainedModel):
 
         self.future_action_window_size = config.model.action_model.future_action_window_size
 
-        # DEBUG: Track random state after action model creation
-        print(
-            f"[DEBUG RNG] After action_model: torch state[:10] = {torch.get_rng_state()[:10].tolist()}"
-        )
-
-        # DEBUG: Print action encoder weights to verify initialization matches starVLA
-        if hasattr(self.action_model, "_head") and hasattr(
-            self.action_model._head, "action_encoder"
-        ):
-            ae = self.action_model._head.action_encoder
-            print(
-                f"[DEBUG INIT] action_encoder.layer1.weight[:3,:5]: {ae.layer1.weight[:3, :5].tolist()}"
-            )
-            print(
-                f"[DEBUG INIT] action_encoder.layer1.weight sum: {ae.layer1.weight.sum().item():.6f}"
-            )
-
     def forward(self, examples: dict, **kwargs):
         """ """
         # actions = [example["action"] for example in examples]  # [B, T, action_dim]
@@ -115,15 +98,7 @@ class QwenGr00t(PreTrainedModel):
             vlm_output_repeated = {"hidden_states": last_hidden_repeated}
             action_input = {"actions": actions_repeated, "state": state_repeated}
 
-            # torch.save(vlm_output_repeated, "vlm_output_repeated.pt")
-            # torch.save(action_input, "action_input.pt")
-
             output = self.action_model.forward(vlm_output_repeated, action_input)
-
-            # torch.save(output, "output.pt")
-
-        # print(f"output: {output}")
-        # assert False
 
         return output["loss"]
 
