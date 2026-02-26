@@ -319,7 +319,7 @@ def apply_fsdp2(policy, device_mesh):
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=torch.bfloat16,
-        reduce_dtype=torch.bfloat16,
+        reduce_dtype=torch.float32,
     )
     fsdp_config = {"mesh": device_mesh, "mp_policy": mp_policy}
 
