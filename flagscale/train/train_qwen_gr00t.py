@@ -311,42 +311,34 @@ def set_seed(seed: int):
 def apply_fsdp2(policy, device_mesh):
     """Apply FSDP2 sharding to QwenGr00t.
 
-    Uses different MixedPrecisionPolicy per component to match starVLA:
-    - VLM blocks: param_dtype=bf16 (starVLA loads VLM in bf16)
-    - DiT blocks: no param_dtype (starVLA keeps action model in fp32)
-    - Root: no param_dtype (remaining params stay fp32, autocast handles compute dtype)
+    Uses a MixedPrecisionPolicy that matches DeepSpeed bf16 behavior:
+      bf16.enabled=true + ZeRO-2 → param_dtype=bf16, reduce_dtype=bf16, reshard=False
     """
     # Cast everything to fp32 first so the root param group has uniform dtype.
-    # MixedPrecisionPolicy(param_dtype=bf16) on VLM blocks will cast them to
-    # bf16 for forward compute, matching starVLA's bf16-loaded VLM.
     policy = policy.float()
 
-    mp_vlm = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32)
-    mp_action = MixedPrecisionPolicy(reduce_dtype=torch.float32)
-    vlm_config = {"mesh": device_mesh, "mp_policy": mp_vlm}
-    action_config = {"mesh": device_mesh, "mp_policy": mp_action}
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=torch.bfloat16,
+        reduce_dtype=torch.bfloat16,
+    )
+    fsdp_config = {"mesh": device_mesh, "mp_policy": mp_policy}
 
     vlm_model = policy.vlm.model  # Qwen3VLForConditionalGeneration
 
     # reshard_after_forward=False keeps params unsharded during forward+backward
-    # (only reshards between iterations). Closer to ZeRO-2 speed at higher memory.
     reshard = False
 
-    # --- Vision encoder blocks (bf16 compute) ---
     for block in vlm_model.model.visual.blocks:
-        fully_shard(block, **vlm_config, reshard_after_forward=reshard)
+        fully_shard(block, **fsdp_config, reshard_after_forward=reshard)
 
-    # --- LLM decoder layers (bf16 compute) ---
     for layer in vlm_model.model.language_model.layers:
-        fully_shard(layer, **vlm_config, reshard_after_forward=reshard)
+        fully_shard(layer, **fsdp_config, reshard_after_forward=reshard)
 
-    # --- DiT action head blocks (fp32 compute) ---
     dit = policy.action_model._head.model
     for block in dit.transformer_blocks:
-        fully_shard(block, **action_config, reshard_after_forward=reshard)
+        fully_shard(block, **fsdp_config, reshard_after_forward=reshard)
 
-    # --- Root: all remaining params are fp32, no param_dtype cast ---
-    fully_shard(policy, **action_config)
+    fully_shard(policy, **fsdp_config)
 
 
 def make_dataset(cfg: DataConfig):
