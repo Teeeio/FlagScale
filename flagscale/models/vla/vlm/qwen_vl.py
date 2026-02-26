@@ -71,6 +71,9 @@ class QwenVLBackbone(nn.Module):
         # TODO: (yupu) We should output the original outputs, not just the hidden states.
         return {"hidden_states": outputs.hidden_states}
 
+    def fsdp_units(self) -> list[nn.Module]:
+        return list(self.model.model.visual.blocks) + list(self.model.model.language_model.layers)
+
 
 class Qwen25VLBackbone(QwenVLBackbone):
     """Qwen2.5-VL backend."""

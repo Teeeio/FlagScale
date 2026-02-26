@@ -67,3 +67,6 @@ class FlowMatchingHead(nn.Module):
 
         actions = self._head.predict_action(vl_embs=vl_embs, state=state)
         return {ACTION: actions}
+
+    def fsdp_units(self) -> list[nn.Module]:
+        return list(self._head.model.transformer_blocks)

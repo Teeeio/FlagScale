@@ -70,20 +70,14 @@ def apply_fsdp2(policy, device_mesh):
     )
     fsdp_config = {"mesh": device_mesh, "mp_policy": mp_policy}
 
-    vlm_model = policy.vlm.model  # Qwen3VLForConditionalGeneration
-
     # reshard_after_forward=False keeps params unsharded during forward+backward
     reshard = False
 
-    for block in vlm_model.model.visual.blocks:
-        fully_shard(block, **fsdp_config, reshard_after_forward=reshard)
+    for unit in policy.vlm.fsdp_units():
+        fully_shard(unit, **fsdp_config, reshard_after_forward=reshard)
 
-    for layer in vlm_model.model.language_model.layers:
-        fully_shard(layer, **fsdp_config, reshard_after_forward=reshard)
-
-    dit = policy.action_model._head.model
-    for block in dit.transformer_blocks:
-        fully_shard(block, **fsdp_config, reshard_after_forward=reshard)
+    for unit in policy.action_model.fsdp_units():
+        fully_shard(unit, **fsdp_config, reshard_after_forward=reshard)
 
     fully_shard(policy, **fsdp_config)
 

@@ -1,6 +1,7 @@
 from typing import Protocol
 
 from torch import Tensor
+from torch.nn import Module
 
 
 class VLMBackbone(Protocol):
@@ -27,8 +28,11 @@ class VLMBackbone(Protocol):
         """
         ...
 
+    def fsdp_units(self) -> list[Module]:
+        """Return submodules that should each be individually sharded by FSDP."""
+        ...
 
-# TODO: (yupu) This `ActionModel` assumes that the VLA model is a composite of a VLM and an ActionModel.
+
 class ActionModel(Protocol):
     def forward(
         self, vlm_output: dict[str, Tensor], action_input: dict[str, Tensor], **kwargs
@@ -52,4 +56,8 @@ class ActionModel(Protocol):
         Returns:
             dict with 'actions': Tensor [B, horizon, action_dim].
         """
+        ...
+
+    def fsdp_units(self) -> list[Module]:
+        """Return submodules that should each be individually sharded by FSDP."""
         ...
