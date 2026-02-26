@@ -19,7 +19,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from torch.optim import Optimizer
 
-from flagscale.runner.utils import logger
+from flagscale.logger import logger
 from flagscale.train.train_config import TrainConfig, DataConfig
 from flagscale.train.datasets.lerobot_dataset import (
     LeRobotDataset,

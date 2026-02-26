@@ -29,7 +29,7 @@ import torch
 import torch.nn as nn
 from transformers import get_scheduler
 
-from flagscale.runner.utils import logger
+from flagscale.logger import logger
 
 if TYPE_CHECKING:
     from flagscale.train.train_config import (
@@ -194,7 +194,6 @@ def build_optim_param_groups(
         try:
             module = model.get_submodule(module_name)
         except AttributeError:
-            # TODO: (yupu) logger can't print the current module name and line number
             logger.warning(
                 f"build_optim_param_groups: Module '{module_name}' not found in model, skipping."
             )
