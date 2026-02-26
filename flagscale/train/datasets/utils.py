@@ -39,6 +39,7 @@ from datasets.utils.logging import disable_progress_bar, enable_progress_bar
 from huggingface_hub import DatasetCard, DatasetCardData, HfApi
 from huggingface_hub.errors import RevisionNotFoundError
 from PIL import Image as PILImage
+from torchvision import transforms
 
 from flagscale.models.configs.types import FeatureType, PolicyFeature
 from flagscale.models.utils.constants import ACTION, OBS_ENV_STATE, OBS_STR
@@ -463,8 +464,6 @@ def hf_transform_to_torch(items_dict: dict[str, list[Any]]) -> dict[str, list[to
     for key in items_dict:
         first_item = items_dict[key][0]
         if isinstance(first_item, PILImage.Image):
-            from torchvision import transforms
-
             to_tensor = transforms.ToTensor()
             items_dict[key] = [to_tensor(img) for img in items_dict[key]]
         elif first_item is None:
