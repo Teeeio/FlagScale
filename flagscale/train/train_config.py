@@ -200,12 +200,13 @@ class ModelConfig(BaseModel):
             return getattr(raw, name)
         raise AttributeError(name)
 
-    # @field_validator("model_name")
-    # @classmethod
-    # def validate_model_name(cls, v):
-    #     if v not in ["pi0", "pi0.5"]:
-    #         raise ValueError(f"Invalid model_name: {v}. Must be 'pi0' or 'pi0.5'")
-    #     return v
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, v):
+        valid_names = {"pi0", "pi0.5", "qwen_gr00t"}
+        if v not in valid_names:
+            raise ValueError(f"Invalid model_name: {v}. Must be one of {valid_names}")
+        return v
 
     def get_model_config_dict(self) -> dict[str, Any]:
         """Get all model-specific config fields (excluding train-level fields)."""

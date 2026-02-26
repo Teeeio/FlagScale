@@ -1,3 +1,6 @@
+# Mainly adopted from:
+# https://github.com/starVLA/starVLA/blob/3f7feefbc5fc25890ad3a7d262b8a0aea1339aa7/deployment/model_server/tools/websocket_policy_server.py
+
 import asyncio
 import http
 import time
