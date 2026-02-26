@@ -213,7 +213,7 @@ DiTConfig = {
 class FlowmatchingActionHead(nn.Module):
     def __init__(self, full_config):
         super().__init__()
-        config = full_config.model.action_model
+        config = full_config.framework.action_model
         self.no_random = config.get("no_random", True)
         self.hidden_size = config.hidden_size
         self.full_config = full_config
@@ -402,7 +402,7 @@ def get_action_model(config=None):
     Factory: build FlowmatchingActionHead from global framework config.
 
     Args:
-        config: Global config (expects config.model.action_model namespace).
+        config: Global config (expects config.framework.action_model namespace).
 
     Returns:
         FlowmatchingActionHead: Initialized FlowMatchingActionHead.
