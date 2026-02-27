@@ -30,6 +30,8 @@ from diffusers.models.embeddings import (
 )
 from torch import nn
 
+from flagscale.logger import logger
+
 
 class TimestepEncoder(nn.Module):
     def __init__(self, embedding_dim, compute_dtype=torch.float32):
@@ -257,9 +259,9 @@ class DiT(ModelMixin, ConfigMixin):
         self.norm_out = nn.LayerNorm(self.inner_dim, elementwise_affine=False, eps=1e-6)
         self.proj_out_1 = nn.Linear(self.inner_dim, 2 * self.inner_dim)
         self.proj_out_2 = nn.Linear(self.inner_dim, self.config.output_dim)
-        print(
-            "Total number of DiT parameters: ",
-            sum(p.numel() for p in self.parameters() if p.requires_grad),
+        logger.info(
+            f"Total number of DiT parameters: "
+            f"{sum(p.numel() for p in self.parameters() if p.requires_grad)}"
         )
 
     def forward(
@@ -353,9 +355,9 @@ class SelfAttentionTransformer(ModelMixin, ConfigMixin):
                 for _ in range(self.config.num_layers)
             ]
         )
-        print(
-            "Total number of SelfAttentionTransformer parameters: ",
-            sum(p.numel() for p in self.parameters() if p.requires_grad),
+        logger.info(
+            f"Total number of SelfAttentionTransformer parameters: "
+            f"{sum(p.numel() for p in self.parameters() if p.requires_grad)}"
         )
 
     def forward(

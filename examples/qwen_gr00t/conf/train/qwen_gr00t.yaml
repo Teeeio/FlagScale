@@ -75,15 +75,14 @@ model:
         lr: 1.0e-05
       action_model:
         lr: 1.0e-04
-
-  scheduler:
-    name: cosine_with_min_lr
-    warmup_steps: 5000
-    scheduler_kwargs:
-      min_lr: 1.0e-06
-    # Legacy fields kept for BC
-    decay_steps: 30000
-    decay_lr: 2.5e-6
+    scheduler:
+      name: cosine_with_min_lr
+      warmup_steps: 5000
+      scheduler_kwargs:
+        min_lr: 1.0e-06
+      # Legacy fields kept for BC
+      decay_steps: 30000
+      decay_lr: 2.5e-6
 
   # ============================================================
   # Module Freezing Configuration

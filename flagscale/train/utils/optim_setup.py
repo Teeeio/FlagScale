@@ -3,12 +3,10 @@
 Supports:
 - Freezing parameters via regex patterns
 - Per-module optimizer settings (lr, weight_decay, betas, etc.) via config
+- LR scheduler nested under optimizer
 
 Example config (YAML):
     model:
-      freeze:
-        freeze_patterns: ["backbone.*"]
-    system:
       optimizer:
         lr: 1e-4
         weight_decay: 0.01
@@ -18,6 +16,13 @@ Example config (YAML):
           action_head:
             lr: 2e-4
             weight_decay: 0.0
+        scheduler:
+          name: cosine_with_min_lr
+          warmup_steps: 5000
+          scheduler_kwargs:
+            min_lr: 1.0e-06
+      freeze:
+        freeze_patterns: ["backbone.*"]
 """
 
 import re
@@ -306,8 +311,8 @@ def setup_optimizer_and_scheduler(
 
     Args:
         model: The model to optimize.
-        train_config: TrainConfig containing model (optimizer, scheduler, freeze config)
-            and system (train_steps).
+        train_config: TrainConfig containing model (optimizer, scheduler,
+            freeze config) and system (train_steps).
 
     Returns:
         Tuple of (optimizer, lr_scheduler).
@@ -322,7 +327,7 @@ def setup_optimizer_and_scheduler(
     )
     scheduler = setup_scheduler(
         optimizer,
-        train_config.model.scheduler,
+        train_config.model.optimizer.scheduler,
         num_training_steps=train_config.system.train_steps,
     )
     return optimizer, scheduler
