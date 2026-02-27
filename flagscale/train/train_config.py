@@ -109,6 +109,7 @@ class OptimizerConfig(BaseModel):
             return tuple(v)
         if isinstance(v, tuple) and len(v) != 2:
             raise ValueError(f"betas must have exactly 2 elements, got {len(v)}")
+        return v
 
     def get_optimizer_kwargs(self) -> dict[str, Any]:
         """Get non-None optimizer kwargs for passing to optimizer.
