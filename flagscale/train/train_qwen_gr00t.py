@@ -64,9 +64,10 @@ def apply_fsdp2(policy, device_mesh):
     # Cast everything to fp32 first so the root param group has uniform dtype.
     policy = policy.float()
 
+    # `reduce_dtype=torch.float32` would make evaluation on libero_goal drop to 94.8% (from 97.0%)
     mp_policy = MixedPrecisionPolicy(
         param_dtype=torch.bfloat16,
-        reduce_dtype=torch.float32,
+        reduce_dtype=torch.bfloat16,
     )
     fsdp_config = {"mesh": device_mesh, "mp_policy": mp_policy}
 
