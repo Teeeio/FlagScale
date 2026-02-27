@@ -3,7 +3,7 @@
     host: 0.0.0.0
     port: 6000
     model_variant: QwenGr00t
-    model: /share/project/fengyupu/github/FlagScale_2/outputs/qwen_gr00t_train_fsdp_uniform_bf16/checkpoints/last
+    model: /share/project/fengyupu/github/FlagScale_2/outputs/qwen_gr00t_train_fsdp_fp32_grad/checkpoints/last
     device: "cuda"
     images_keys:
       - observation.images.base_0_rgb

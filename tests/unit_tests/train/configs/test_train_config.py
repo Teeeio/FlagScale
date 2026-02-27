@@ -20,10 +20,10 @@ class TestOptimizerConfig(unittest.TestCase):
     def test_default_values(self):
         config = OptimizerConfig()
         self.assertEqual(config.name, "AdamW")
-        self.assertEqual(config.lr, 2.5e-5)
-        self.assertEqual(config.betas, (0.9, 0.95))
-        self.assertEqual(config.eps, 1e-8)
-        self.assertEqual(config.weight_decay, 0.01)
+        self.assertIsNone(config.lr)
+        self.assertIsNone(config.betas)
+        self.assertIsNone(config.eps)
+        self.assertIsNone(config.weight_decay)
 
     def test_custom_values(self):
         config = OptimizerConfig(
@@ -84,32 +84,22 @@ class TestSystemConfig(unittest.TestCase):
     def test_hierarchical_structure(self):
         config = SystemConfig(
             batch_size=8,
-            optimizer=OptimizerConfig(lr=1e-4),
-            scheduler=SchedulerConfig(warmup_steps=100),
             checkpoint=CheckpointConfig(output_directory="/tmp"),
         )
 
-        # Test hierarchical access
         self.assertEqual(config.batch_size, 8)
-        self.assertEqual(config.optimizer.lr, 1e-4)
-        self.assertEqual(config.scheduler.warmup_steps, 100)
         self.assertEqual(config.checkpoint.output_directory, "/tmp")
 
     def test_from_dict(self):
         config_dict = {
             "batch_size": 16,
             "train_steps": 5000,
-            "optimizer": {"lr": 5e-5, "betas": (0.9, 0.999)},
-            "scheduler": {"warmup_steps": 200},
             "checkpoint": {"output_directory": "/output", "save_freq": 100},
         }
         config = SystemConfig(**config_dict)
 
         self.assertEqual(config.batch_size, 16)
         self.assertEqual(config.train_steps, 5000)
-        self.assertEqual(config.optimizer.lr, 5e-5)
-        self.assertEqual(config.optimizer.betas, (0.9, 0.999))
-        self.assertEqual(config.scheduler.warmup_steps, 200)
         self.assertEqual(config.checkpoint.save_freq, 100)
 
 
@@ -200,8 +190,6 @@ class TestTrainConfig(unittest.TestCase):
             "system": {
                 "batch_size": 4,
                 "train_steps": 10000,
-                "optimizer": {"lr": 1e-4},
-                "scheduler": {"warmup_steps": 500},
                 "checkpoint": {"output_directory": "/tmp/ckpt"},
             },
             "model": {
@@ -209,21 +197,22 @@ class TestTrainConfig(unittest.TestCase):
                 "checkpoint_dir": "/model",
                 "tokenizer_path": "/tokenizer",
                 "action_steps": 50,
+                "optimizer": {"lr": 1e-4},
+                "scheduler": {"warmup_steps": 500},
             },
             "data": {"data_path": "/data", "use_imagenet_stats": True},
         }
 
         config = TrainConfig(**config_dict)
 
-        # Test hierarchical access
         self.assertEqual(config.system.batch_size, 4)
         self.assertEqual(config.system.train_steps, 10000)
-        self.assertEqual(config.system.optimizer.lr, 1e-4)
-        self.assertEqual(config.system.scheduler.warmup_steps, 500)
         self.assertEqual(config.system.checkpoint.output_directory, "/tmp/ckpt")
 
         self.assertEqual(config.model.model_name, "pi0")
         self.assertEqual(config.model.checkpoint_dir, "/model")
+        self.assertEqual(config.model.optimizer.lr, 1e-4)
+        self.assertEqual(config.model.scheduler.warmup_steps, 500)
 
         self.assertEqual(config.data.data_path, "/data")
         self.assertEqual(config.data.use_imagenet_stats, True)
@@ -234,11 +223,14 @@ class TestTrainConfig(unittest.TestCase):
             "train": {
                 "system": {
                     "batch_size": 8,
-                    "optimizer": {"lr": 2e-5},
-                    "scheduler": {},
                     "checkpoint": {"output_directory": "/out"},
                 },
-                "model": {"model_name": "pi0.5", "checkpoint_dir": "/ckpt"},
+                "model": {
+                    "model_name": "pi0.5",
+                    "checkpoint_dir": "/ckpt",
+                    "optimizer": {"lr": 2e-5},
+                    "scheduler": {},
+                },
                 "data": {"data_path": "/dataset"},
             }
         }
@@ -247,7 +239,7 @@ class TestTrainConfig(unittest.TestCase):
         config = TrainConfig.from_hydra_config(hydra_config)
 
         self.assertEqual(config.system.batch_size, 8)
-        self.assertEqual(config.system.optimizer.lr, 2e-5)
+        self.assertEqual(config.model.optimizer.lr, 2e-5)
         self.assertEqual(config.model.model_name, "pi0.5")
         self.assertEqual(config.data.data_path, "/dataset")
 
@@ -255,8 +247,6 @@ class TestTrainConfig(unittest.TestCase):
         config_dict = {
             "system": {
                 "batch_size": "invalid",  # Should be int
-                "optimizer": {},
-                "scheduler": {},
                 "checkpoint": {"output_directory": "/tmp"},
             },
             "model": {"model_name": "pi0", "checkpoint_dir": "/model"},
@@ -269,8 +259,6 @@ class TestTrainConfig(unittest.TestCase):
     def test_missing_required_field(self):
         config_dict = {
             "system": {
-                "optimizer": {},
-                "scheduler": {},
                 "checkpoint": {"output_directory": "/tmp"},
             },
             "model": {
@@ -291,11 +279,15 @@ class TestConfigSerialization(unittest.TestCase):
         config = TrainConfig(
             system=SystemConfig(
                 batch_size=16,
-                optimizer=OptimizerConfig(),
-                scheduler=SchedulerConfig(),
                 checkpoint=CheckpointConfig(output_directory="/tmp"),
             ),
-            model=ModelConfig(model_name="pi0", checkpoint_dir="/model", action_steps=50),
+            model=ModelConfig(
+                model_name="pi0",
+                checkpoint_dir="/model",
+                action_steps=50,
+                optimizer=OptimizerConfig(),
+                scheduler=SchedulerConfig(),
+            ),
             data=DataConfig(data_path="/data"),
         )
 

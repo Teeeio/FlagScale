@@ -306,8 +306,8 @@ def setup_optimizer_and_scheduler(
 
     Args:
         model: The model to optimize.
-        train_config: TrainConfig containing system (optimizer, scheduler, train_steps)
-            and model (freeze config).
+        train_config: TrainConfig containing model (optimizer, scheduler, freeze config)
+            and system (train_steps).
 
     Returns:
         Tuple of (optimizer, lr_scheduler).
@@ -317,12 +317,12 @@ def setup_optimizer_and_scheduler(
     """
     optimizer = setup_optimizer(
         model,
-        train_config.system.optimizer,
+        train_config.model.optimizer,
         freeze_config=train_config.model.freeze,
     )
     scheduler = setup_scheduler(
         optimizer,
-        train_config.system.scheduler,
+        train_config.model.scheduler,
         num_training_steps=train_config.system.train_steps,
     )
     return optimizer, scheduler
