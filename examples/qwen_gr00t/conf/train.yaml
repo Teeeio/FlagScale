@@ -3,7 +3,7 @@ defaults:
   - train: qwen_gr00t
 
 experiment:
-  exp_name: qwen_gr00t_train_fsdp_fp32_grad_test_refactor
+  exp_name: qwen_gr00t_train_fsdp_no_hardcode_image_keys
   seed: 42
   save_steps: 10000
   load: null

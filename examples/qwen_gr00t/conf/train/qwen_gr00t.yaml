@@ -1,5 +1,5 @@
 system:
-  batch_size: 1
+  batch_size: 16
   train_steps: 30000
   log_freq: 1
   grad_clip_norm: 1.0
@@ -54,9 +54,6 @@ model:
       cross_attention_dim: 2048
       dropout: 0.2
       final_dropout: True
-      # # FIXME: Debug only
-      # dropout: 0
-      # final_dropout: False
       interleave_self_attention: True
       norm_type: ada_norm
       num_layers: 16
@@ -131,14 +128,6 @@ data:
   # Path to the training data
   data_path: /share/project/fengyupu/datasets/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot/
   tolerance_s: 0.0001
-  use_imagenet_stats: False
-  # To match the input features naming from the dataset to the policy config
-  # For example, for the aloha_mobile_cabinet dataset, the rename_map is:
-  rename_map:
-    observation.images.cam_high: observation.images.base_0_rgb
-    observation.images.cam_left_wrist: observation.images.left_wrist_0_rgb
-    observation.images.cam_right_wrist: observation.images.right_wrist_0_rgb
-  use_quantiles: false
   # TODO: (yupu) I think these indices should belong to the policy config, maybe put it in the model config?
   observation_delta_indices: [0]
   action_delta_indices: [0,1,2,3,4,5,6,7]
