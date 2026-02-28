@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import (
+    AutoConfig,
     AutoProcessor,
     PretrainedConfig,
     Qwen2_5_VLForConditionalGeneration,
@@ -41,6 +42,7 @@ class QwenVLBackbone(nn.Module):
         super().__init__()
         qwenvl_config = config.model.qwenvl
         self.model_id = qwenvl_config.base_vlm
+        self._load_pretrained = qwenvl_config.get("load_pretrained", True)
 
         # TODO: (yupu) The model loaded by `from_pretrained` is eval mode by default, is this expected? I removed `policy.train()` in train_qwen_gr00t.py to match starVLA, but not sure if this is the right way to do this.
         self.model = self._load_model(self.model_id)
@@ -57,7 +59,7 @@ class QwenVLBackbone(nn.Module):
         """HF config object (e.g., Qwen2VLConfig)."""
         return self.model.config
 
-    def prepare_input(self, batch: dict) -> dict[str, torch.Tensor]:
+    def prepare_input(self, batch: dict, image_feature_keys: list[str]) -> dict[str, torch.Tensor]:
         raise NotImplementedError
 
     def forward(self, batch: dict[str, torch.Tensor], **kwargs) -> dict[str, torch.Tensor]:
@@ -79,6 +81,9 @@ class Qwen25VLBackbone(QwenVLBackbone):
     """Qwen2.5-VL backend."""
 
     def _load_model(self, model_id: str):
+        if not self._load_pretrained:
+            hf_config = AutoConfig.from_pretrained(model_id)
+            return Qwen2_5_VLForConditionalGeneration(hf_config)
         # WARNING: hard-coded attn_implementation and torch_dtype
         return Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_id,
@@ -86,17 +91,15 @@ class Qwen25VLBackbone(QwenVLBackbone):
             torch_dtype="auto",
         )
 
-    def prepare_input(self, batch: dict) -> dict[str, torch.Tensor]:
-        # TODO: (yupu) This is a hack, we should find a better way to handle this.
-        image_keys = self._config.data.vla_data.image_features
-        return self.build_qwenvl_inputs(examples=batch, image_keys=image_keys)
+    def prepare_input(self, batch: dict, image_feature_keys: list[str]) -> dict[str, torch.Tensor]:
+        return self.build_qwenvl_inputs(examples=batch, image_feature_keys=image_feature_keys)
 
     def build_qwenvl_inputs(
         self,
         examples,
         images=None,
         instructions=None,
-        image_keys=None,
+        image_feature_keys=None,
         **kwargs,
     ):
         if examples is not None and (images is None or instructions is None):
@@ -108,7 +111,7 @@ class Qwen25VLBackbone(QwenVLBackbone):
                 instructions = [instructions]
 
             batch_images = None
-            for key in image_keys:
+            for key in image_feature_keys:
                 imgs = examples[key]
                 if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
                     imgs = [imgs]
@@ -164,22 +167,22 @@ class Qwen3VLBackbone(QwenVLBackbone):
     """Qwen3-VL backend."""
 
     def _load_model(self, model_id: str) -> Qwen3VLForConditionalGeneration:
-        # FIXME: hard-coded attn_implementation and torch_dtype matches starVLA
-        # TODO: (yupu): During inference/serving, it's required to load model twice, not only that, the original qwen model has to be loaded!
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            model_id,
-            attn_implementation="flash_attention_2",
-            torch_dtype=torch.bfloat16,
-        )
+        if not self._load_pretrained:
+            hf_config = AutoConfig.from_pretrained(model_id)
+            model = Qwen3VLForConditionalGeneration(hf_config)
+        else:
+            # FIXME: hard-coded attn_implementation and torch_dtype matches starVLA
+            model = Qwen3VLForConditionalGeneration.from_pretrained(
+                model_id,
+                attn_implementation="flash_attention_2",
+                torch_dtype=torch.bfloat16,
+            )
         # Align dims qwen3 with qwen2.5, actually it's not needed in our case
         model.config.hidden_size = model.config.text_config.hidden_size
         return model
 
-    def prepare_input(self, batch: dict) -> dict[str, torch.Tensor]:
-        # TODO: (yupu) This is a hack, we should find a better way to handle this.
-        # image_keys = self._config.data.vla_data.image_features.keys()
-        image_keys = ["observation.images.wrist_image", "observation.images.image"]
-        return self.build_qwenvl_inputs(examples=batch, image_keys=image_keys)
+    def prepare_input(self, batch: dict, image_feature_keys: list[str]) -> dict[str, torch.Tensor]:
+        return self.build_qwenvl_inputs(examples=batch, image_feature_keys=image_feature_keys)
 
     # TODO: (yupu) Refactor this args
     def build_qwenvl_inputs(
@@ -187,7 +190,7 @@ class Qwen3VLBackbone(QwenVLBackbone):
         examples,
         images=None,
         instructions=None,
-        image_keys=None,
+        image_feature_keys=None,
         **kwargs,
     ):
         if examples is not None and (images is None or instructions is None):
@@ -199,7 +202,7 @@ class Qwen3VLBackbone(QwenVLBackbone):
                 instructions = [instructions]
 
             batch_images = None
-            for key in image_keys:
+            for key in image_feature_keys:
                 imgs = examples[key]
                 if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
                     imgs = [imgs]

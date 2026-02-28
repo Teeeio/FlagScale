@@ -13,15 +13,22 @@ A lightweight implementation that Qwen-VL + Flow-matching head to directly predi
 Flow-matching header is copyright from GR00T N1.5,
 """
 
-import torch
-from transformers import PretrainedConfig, PreTrainedModel
+from pathlib import Path
 
+import torch
+from omegaconf import OmegaConf
+
+from flagscale.models.configs.types import FeatureType, PolicyFeature
 from flagscale.models.utils.constants import ACTION
+from flagscale.models.vla.base_policy import TrainablePolicy
 from flagscale.models.vla.registry import build_action_model, build_vlm
 from flagscale.train.train_config import TrainConfig
 
+# Subdirectory within checkpoint for saved VLM architecture config + processor
+VLM_CONFIG_DIR = "vlm_config"
 
-class QwenGr00t(PreTrainedModel):
+
+class QwenGr00t(TrainablePolicy):
     """
     Multimodal vision-language-action model.
 
@@ -32,10 +39,8 @@ class QwenGr00t(PreTrainedModel):
     Focus: Predict future continuous actions conditioned on images + instruction.
     """
 
-    config_class = PretrainedConfig
-
     def __init__(self, config: TrainConfig, **kwargs):
-        super().__init__(PretrainedConfig())
+        super().__init__()
         self._config = config
 
         vlm_type = config.model.vlm.get("type", "qwen3-vl")
@@ -51,6 +56,29 @@ class QwenGr00t(PreTrainedModel):
 
         self.future_action_window_size = config.model.action_model.future_action_window_size
 
+        # Deserialize input/output features from config (checkpoint load path).
+        # At training time, make_policy sets these on the policy after construction.
+        load_pretrained = config.model.qwenvl.get("load_pretrained", True)
+        raw_input = config.model.get("input_features", {})
+        raw_output = config.model.get("output_features", {})
+
+        if not load_pretrained and (not raw_input or not raw_output):
+            raise ValueError(
+                "Checkpoint config missing input_features/output_features. "
+                "Re-save the checkpoint with the latest training code."
+            )
+
+        if raw_input:
+            self.input_features = {
+                k: PolicyFeature(type=FeatureType(v["type"]), shape=tuple(v["shape"]))
+                for k, v in raw_input.items()
+            }
+        if raw_output:
+            self.output_features = {
+                k: PolicyFeature(type=FeatureType(v["type"]), shape=tuple(v["shape"]))
+                for k, v in raw_output.items()
+            }
+
     def forward(self, examples: dict, **kwargs):
         """ """
         # actions = [example["action"] for example in examples]  # [B, T, action_dim]
@@ -59,7 +87,9 @@ class QwenGr00t(PreTrainedModel):
 
         # Step 1: QWenVL input format
         # NOTE: (yupu) The order of the images differs from starVLA, which is [image, wrist_image]
-        qwen_inputs = self.vlm.prepare_input(examples)
+        qwen_inputs = self.vlm.prepare_input(
+            examples, image_feature_keys=list(self.image_features.keys())
+        )
 
         # TODO: (yupu) Hard-coded autocast and dtype, matches starVLA
         with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -100,7 +130,7 @@ class QwenGr00t(PreTrainedModel):
 
             output = self.action_model.forward(vlm_output_repeated, action_input)
 
-        return output["loss"]
+        return {"loss": output["loss"]}
 
     @torch.inference_mode()
     def predict_action(self, examples: list[dict], **kwargs) -> dict:
@@ -119,7 +149,9 @@ class QwenGr00t(PreTrainedModel):
         # instructions = [example["lang"] for example in examples]  # [B, str]
 
         # We assume the images are already resized during preprocessing.
-        qwen_inputs = self.vlm.prepare_input(examples)
+        qwen_inputs = self.vlm.prepare_input(
+            examples, image_feature_keys=list(self.image_features.keys())
+        )
         state = None  # examples[OBS_STATE]
 
         # state = (
@@ -155,5 +187,39 @@ class QwenGr00t(PreTrainedModel):
             action_input = {"state": state}
             output = self.action_model.predict_action(vlm_output_for_action, action_input)
 
-        # Assume the output of the action moadel is dict mapps `ACTION` to the normalized actions
+        # Assume the output of the action model is dict mapping `ACTION` to the normalized actions
         return output
+
+    def save_pretrained_configs(self, save_dir: Path) -> None:
+        vlm_config_dir = save_dir / VLM_CONFIG_DIR
+        vlm_config_dir.mkdir(parents=True, exist_ok=True)
+        self.vlm.model.config.save_pretrained(vlm_config_dir)
+        self.vlm.processor.save_pretrained(vlm_config_dir)
+
+        # Patch saved train config so load_checkpoint skips pretrained VLM download
+        config_path = save_dir / "train_config.yaml"
+        if not config_path.exists():
+            raise FileNotFoundError(
+                f"Expected train_config.yaml at {config_path}. "
+                "save_pretrained_configs must be called after save_checkpoint."
+            )
+        saved_config = OmegaConf.load(config_path)
+        OmegaConf.update(saved_config, "model.qwenvl.load_pretrained", False)
+        OmegaConf.update(saved_config, "model.qwenvl.base_vlm", str(vlm_config_dir))
+        OmegaConf.update(
+            saved_config,
+            "model.input_features",
+            {
+                k: {"type": ft.type.value, "shape": list(ft.shape)}
+                for k, ft in self.input_features.items()
+            },
+        )
+        OmegaConf.update(
+            saved_config,
+            "model.output_features",
+            {
+                k: {"type": ft.type.value, "shape": list(ft.shape)}
+                for k, ft in self.output_features.items()
+            },
+        )
+        OmegaConf.save(saved_config, config_path)

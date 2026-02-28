@@ -7,6 +7,7 @@ import random
 import time
 from collections.abc import Iterator
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 
 from omegaconf import OmegaConf, DictConfig
@@ -27,7 +28,7 @@ from flagscale.train.datasets.lerobot_dataset import (
 )
 from flagscale.train.datasets.utils import dataset_to_policy_features
 from flagscale.train.processor import PolicyProcessorPipeline
-from flagscale.models.utils.constants import ACTION, OBS_PREFIX, REWARD
+from flagscale.models.utils.constants import ACTION, OBS_PREFIX, PRETRAINED_MODEL_DIR, REWARD
 from flagscale.models.configs.types import FeatureType
 from flagscale.train.utils.logging_utils import (
     AverageMeter,
@@ -201,17 +202,12 @@ def make_policy(
     }
     input_features = {key: ft for key, ft in features.items() if key not in output_features}
 
-    # TODO: (yupu) This is a hack, we should find a better way to handle this. LeRobot does this in the policy config.
-    # The order of the images is defined in the dataset config.json
-    image_features = {
-        key: ft for key, ft in input_features.items() if ft.type is FeatureType.VISUAL
-    }
-    config.data.vla_data.image_features = image_features
-
     policy = QwenGr00t(config=config)
+    policy.input_features = input_features
+    policy.output_features = output_features
     policy.to("cuda")
 
-    return policy, input_features, output_features
+    return policy
 
 
 def make_preprocessor_from_config(
@@ -383,7 +379,8 @@ def update_policy(
         torch.amp.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
     )
     with autocast_context:
-        loss = policy(batch)
+        output = policy(batch)
+        loss = output["loss"]
 
     loss.backward()
 
@@ -426,7 +423,7 @@ def main(config: TrainConfig, seed: int):
     dataset = make_dataset(config.data)
     dist.barrier()
 
-    policy, input_features, output_features = make_policy(config=config, ds_meta=dataset.meta)
+    policy = make_policy(config=config, ds_meta=dataset.meta)
     dist.barrier()
 
     # --- Apply FSDP2 ---
@@ -439,8 +436,8 @@ def main(config: TrainConfig, seed: int):
         "normalizer_processor": {
             "stats": dataset.meta.stats,
             "features": {
-                **input_features,
-                **output_features,
+                **policy.input_features,
+                **policy.output_features,
             },
         },
     }
@@ -483,8 +480,8 @@ def main(config: TrainConfig, seed: int):
             "unnormalizer_processor": {
                 "stats": dataset.meta.stats,
                 "features": {
-                    **input_features,
-                    **output_features,
+                    **policy.input_features,
+                    **policy.output_features,
                 },
             },
         }
@@ -570,8 +567,6 @@ def main(config: TrainConfig, seed: int):
             state_dict = get_model_state_dict(policy, options=options)
 
             if is_main_process:
-                from pathlib import Path
-
                 logger.info(f"Saving checkpoint at step {step}")
                 output_dir = Path(config.system.checkpoint.output_directory)
                 checkpoint_dir = get_step_checkpoint_dir(
@@ -584,6 +579,8 @@ def main(config: TrainConfig, seed: int):
                     preprocessor=preprocessor,
                     postprocessor=postprocessor,
                 )
+                # TODO: (yupu) Maybe fold into save_checkpoint once it accepts the policy object
+                policy.save_pretrained_configs(checkpoint_dir / PRETRAINED_MODEL_DIR)
                 update_last_checkpoint(checkpoint_dir)
 
             dist.barrier()

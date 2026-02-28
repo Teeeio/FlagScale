@@ -12,7 +12,8 @@ system:
     # Whether to save checkpoint
     save_checkpoint: true
     # Number of steps between checkpoints
-    save_freq: 10000
+    # save_freq: 10000
+    save_freq: 1
   # TODO(yupu): Support resuming from checkpoint
 
 model:
