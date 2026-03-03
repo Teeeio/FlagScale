@@ -579,7 +579,7 @@ def main(config: TrainConfig, seed: int):
                 )
                 save_checkpoint(
                     checkpoint_dir=checkpoint_dir,
-                    policy=state_dict,
+                    model_or_state_dict=state_dict,
                     config=ckpt_config,
                     preprocessor=preprocessor,
                     postprocessor=postprocessor,

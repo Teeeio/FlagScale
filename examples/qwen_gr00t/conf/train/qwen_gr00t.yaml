@@ -33,6 +33,8 @@ model:
   dino:
     dino_backbone: dinov2_vits14
   action_model:
+    # Whether to condition the action model on proprioceptive state (observation.state)
+    use_state: false
     type: flow_matching
     action_model_type: DiT-B
     action_hidden_dim: 1024

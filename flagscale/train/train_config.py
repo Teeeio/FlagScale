@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class FreezeConfig(BaseModel):
-    """Pattern-based module freezing configuration (NeMo-style).
+    """Pattern-based module freezing configuration.
 
     Freezing logic:
     1. For each parameter, check if name matches any `freeze_patterns`

@@ -107,45 +107,35 @@ class Qwen25VLBackbone(QwenVLBackbone):
     def prepare_input(self, batch: dict, image_feature_keys: list[str]) -> dict[str, torch.Tensor]:
         return self.build_qwenvl_inputs(examples=batch, image_feature_keys=image_feature_keys)
 
-    def build_qwenvl_inputs(
-        self,
-        examples,
-        images=None,
-        instructions=None,
-        image_feature_keys=None,
-        **kwargs,
-    ):
-        if examples is not None and (images is None or instructions is None):
-            # TODO: (yupu) hard-code task key to "task"
-            instructions = examples["task"]
-            if isinstance(instructions, torch.Tensor):
-                instructions = instructions.detach().cpu().tolist()
-            if isinstance(instructions, str):
-                instructions = [instructions]
+    def build_qwenvl_inputs(self, examples, image_feature_keys):
+        # TODO: (yupu) hard-code task key to "task"
+        instructions = examples["task"]
+        if isinstance(instructions, torch.Tensor):
+            instructions = instructions.detach().cpu().tolist()
+        if isinstance(instructions, str):
+            instructions = [instructions]
 
-            batch_images = None
-            for key in image_feature_keys:
-                imgs = examples[key]
-                if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
-                    imgs = [imgs]
-                key_images = [_to_pil(img) for img in imgs]
-                if batch_images is None:
-                    batch_images = [[img] for img in key_images]
-                else:
-                    for sample_images, img in zip(batch_images, key_images):
-                        sample_images.append(img)
+        batch_images = None
+        for key in image_feature_keys:
+            imgs = examples[key]
+            if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
+                imgs = [imgs]
+            key_images = [_to_pil(img) for img in imgs]
+            if batch_images is None:
+                batch_images = [[img] for img in key_images]
+            else:
+                for sample_images, img in zip(batch_images, key_images):
+                    sample_images.append(img)
 
-            for idx, sample_images in enumerate(batch_images):
-                batch_images[idx] = [img for img in sample_images if img is not None]
-
-            images = batch_images
+        for idx, sample_images in enumerate(batch_images):
+            batch_images[idx] = [img for img in sample_images if img is not None]
 
         from qwen_vl_utils import process_vision_info
 
         # Create messages: one message per sample
         messages = []
-        assert len(images) == len(instructions)
-        for imgs, instruction in zip(images, instructions):
+        assert len(batch_images) == len(instructions)
+        for imgs, instruction in zip(batch_images, instructions):
             content = [{"type": "image", "image": img} for img in imgs]
 
             if "CoT_prompt" in self._config.data.vla_data:
@@ -193,51 +183,39 @@ class Qwen3VLBackbone(QwenVLBackbone):
                 attn_implementation=attn_impl,
                 torch_dtype=torch.bfloat16,
             )
-        # Align dims qwen3 with qwen2.5, actually it's not needed in our case
-        model.config.hidden_size = model.config.text_config.hidden_size
+
         return model
 
     def prepare_input(self, batch: dict, image_feature_keys: list[str]) -> dict[str, torch.Tensor]:
         return self.build_qwenvl_inputs(examples=batch, image_feature_keys=image_feature_keys)
 
-    # TODO: (yupu) Refactor this args
-    def build_qwenvl_inputs(
-        self,
-        examples,
-        images=None,
-        instructions=None,
-        image_feature_keys=None,
-        **kwargs,
-    ):
-        if examples is not None and (images is None or instructions is None):
-            # TODO: (yupu) hard-code task key to "task"
-            instructions = examples["task"]
-            if isinstance(instructions, torch.Tensor):
-                instructions = instructions.detach().cpu().tolist()
-            if isinstance(instructions, str):
-                instructions = [instructions]
+    def build_qwenvl_inputs(self, examples, image_feature_keys):
+        # TODO: (yupu) hard-code task key to "task"
+        instructions = examples["task"]
+        if isinstance(instructions, torch.Tensor):
+            instructions = instructions.detach().cpu().tolist()
+        if isinstance(instructions, str):
+            instructions = [instructions]
 
-            batch_images = None
-            for key in image_feature_keys:
-                imgs = examples[key]
-                if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
-                    imgs = [imgs]
-                key_images = [_to_pil(img) for img in imgs]
-                if batch_images is None:
-                    batch_images = [[img] for img in key_images]
-                else:
-                    for sample_images, img in zip(batch_images, key_images):
-                        sample_images.append(img)
+        batch_images = None
+        for key in image_feature_keys:
+            imgs = examples[key]
+            if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
+                imgs = [imgs]
+            key_images = [_to_pil(img) for img in imgs]
+            if batch_images is None:
+                batch_images = [[img] for img in key_images]
+            else:
+                for sample_images, img in zip(batch_images, key_images):
+                    sample_images.append(img)
 
-            for idx, sample_images in enumerate(batch_images):
-                batch_images[idx] = [img for img in sample_images if img is not None]
-
-            images = batch_images
+        for idx, sample_images in enumerate(batch_images):
+            batch_images[idx] = [img for img in sample_images if img is not None]
 
         # Create messages: one message per sample
         messages = []
-        assert len(images) == len(instructions)
-        for imgs, instruction in zip(images, instructions):
+        assert len(batch_images) == len(instructions)
+        for imgs, instruction in zip(batch_images, instructions):
             content = [{"type": "image", "image": img} for img in imgs]
 
             if "CoT_prompt" in self._config.data.vla_data:

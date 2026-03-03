@@ -36,7 +36,7 @@ class Policy:
         # TODO: (yupu): model.to(dtype)?
         logger.info(f"Policy model loading latency: {time.perf_counter() - t_s:.2f}s")
 
-    def infer(self, batch):
+    def inference(self, batch):
         # FIXME: image reisze
         logger.info("Start to inference")
         print(f"batch: {batch}")

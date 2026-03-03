@@ -18,7 +18,7 @@ from pathlib import Path
 import torch
 
 from flagscale.models.configs.types import FeatureType, PolicyFeature
-from flagscale.models.utils.constants import ACTION, VLM_CONFIG_DIR
+from flagscale.models.utils.constants import ACTION, OBS_STATE, VLM_CONFIG_DIR
 from flagscale.models.vla.base_policy import TrainablePolicy
 from flagscale.models.vla.registry import build_action_model, build_vlm
 from flagscale.train.train_config import TrainConfig
@@ -51,6 +51,7 @@ class QwenGr00t(TrainablePolicy):
         )
 
         self.future_action_window_size = config.model.action_model.future_action_window_size
+        self.use_state = config.model.action_model.get("use_state", False)
 
         # Deserialize input/output features from config (checkpoint load path).
         # At training time, make_policy sets these on the policy after construction.
@@ -77,9 +78,8 @@ class QwenGr00t(TrainablePolicy):
 
     def forward(self, examples: dict, **kwargs):
         """ """
-        # actions = [example["action"] for example in examples]  # [B, T, action_dim]
         actions = examples[ACTION]
-        state = None  # examples[OBS_STATE]
+        state = examples[OBS_STATE] if self.use_state else None
 
         # Step 1: QWenVL input format
         # NOTE: (yupu) The order of the images differs from starVLA, which is [image, wrist_image]
@@ -97,9 +97,6 @@ class QwenGr00t(TrainablePolicy):
         with torch.autocast("cuda", dtype=torch.float32):
             # TODO: (yupu) Is this a bug or a feature? The action dtype would stay as bf16 under this autocast.
             actions = actions.to(device=last_hidden.device, dtype=last_hidden.dtype)
-            # actions = torch.tensor(
-            #     np.array(actions), device=last_hidden.device, dtype=last_hidden.dtype
-            # )  # [B, T_full, action_dim]
 
             # TODO: does not match RoboBrainX, need to check
             actions_target = actions[
@@ -120,7 +117,6 @@ class QwenGr00t(TrainablePolicy):
                 state = state.to(device=last_hidden.device, dtype=last_hidden.dtype)
                 state_repeated = state.repeat(repeated_diffusion_steps, 1, 1)
 
-            # Use action head forward API
             vlm_output_repeated = {"hidden_states": last_hidden_repeated}
             action_input = {"actions": actions_repeated, "state": state_repeated}
 
@@ -139,29 +135,10 @@ class QwenGr00t(TrainablePolicy):
             dict:
                 normalized_actions (np.ndarray): Shape [B, T, action_dim], diffusion-sampled normalized actions.
         """
-        # TODO: (yupu) Fix inference input format to use constants (OBS_IMAGE, OBS_LANGUAGE, OBS_STATE)
-        # instead of hardcoded keys. The current keys are inconsistent with training batch format.
-        # batch_images = [[to_pil_preserve(example["image"])] for example in examples]  # [B, [PLT]]
-        # instructions = [example["lang"] for example in examples]  # [B, str]
-
-        # We assume the images are already resized during preprocessing.
         qwen_inputs = self.vlm.prepare_input(
             examples, image_feature_keys=list(self.image_features.keys())
         )
-        state = None  # examples[OBS_STATE]
-
-        # state = (
-        #     [example["state"] for example in examples] if "state" in examples[0] else None
-        # )  # [B, 1, state_dim]
-
-        # train_obs_image_size = getattr(self._config.data.vla_data, "image_size", None)
-        # if train_obs_image_size:
-        #     batch_images = resize_images(batch_images, target_size=train_obs_image_size)
-
-        # # Step 1: QWenVL input format
-        # qwen_inputs = self.vlm.build_qwenvl_inputs(
-        #     examples=None, images=batch_images, instructions=instructions
-        # )
+        state = examples[OBS_STATE] if self.use_state else None
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
             vlm_output = self.vlm.forward(qwen_inputs, output_attentions=False)
@@ -170,12 +147,6 @@ class QwenGr00t(TrainablePolicy):
 
         if state is not None:
             state = state.to(device=last_hidden.device, dtype=last_hidden.dtype)
-
-        # state_tensor = (
-        #     torch.from_numpy(np.array(state)).to(last_hidden.device, dtype=last_hidden.dtype)
-        #     if state is not None
-        #     else None
-        # )
 
         # Step 4: Action Expert Forward
         with torch.autocast("cuda", dtype=torch.float32):

@@ -16,8 +16,8 @@ from flagscale.logger import logger
 
 
 @runtime_checkable
-class Policy(Protocol):
-    def infer(self, obs: dict) -> dict: ...
+class ServablePolicy(Protocol):
+    def inference(self, obs: dict) -> dict: ...
 
 
 class WebsocketPolicyServer:
@@ -31,7 +31,7 @@ class WebsocketPolicyServer:
 
     def __init__(
         self,
-        policy: Policy,
+        policy: ServablePolicy,
         host: str = "0.0.0.0",
         port: int = 10093,
         metadata: dict | None = None,
@@ -68,7 +68,7 @@ class WebsocketPolicyServer:
                 obs: dict = msgpack_numpy.unpackb(await websocket.recv())
 
                 infer_time = time.monotonic()
-                action: dict = self._policy.infer(obs)
+                action: dict = self._policy.inference(obs)
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {"infer_ms": infer_time * 1000}

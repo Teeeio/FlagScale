@@ -20,6 +20,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from safetensors.torch import load_model, save_file
 
+from flagscale.logger import logger
 from flagscale.models.utils.constants import (
     CHECKPOINTS_DIR,
     LAST_CHECKPOINT_LINK,
@@ -59,7 +60,7 @@ def update_last_checkpoint(checkpoint_dir: Path) -> Path:
 
 def save_checkpoint(
     checkpoint_dir: Path,
-    policy,
+    model_or_state_dict,
     config,
     preprocessor=None,
     postprocessor=None,
@@ -76,7 +77,7 @@ def save_checkpoint(
 
     Args:
         checkpoint_dir: Directory to save checkpoint (e.g., checkpoints/005000)
-        policy: The model
+        model_or_state_dict: nn.Module or a pre-gathered state_dict (e.g. from FSDP2)
         config: Training config (OmegaConf, Pydantic, or dict)
         preprocessor: Optional PolicyProcessorPipeline
     """
@@ -91,12 +92,13 @@ def save_checkpoint(
         config = OmegaConf.create(config)
     OmegaConf.save(config, pretrained_dir / "train_config.yaml")
 
-    # Accept either a model or a pre-gathered state_dict (e.g. from FSDP2).
     # Clone tensors to avoid safetensors errors with non-contiguous views.
-    if isinstance(policy, dict):
-        state_dict = {k: v.clone().contiguous() for k, v in policy.items()}
+    if isinstance(model_or_state_dict, dict):
+        state_dict = {k: v.clone().contiguous() for k, v in model_or_state_dict.items()}
     else:
-        state_dict = {k: v.clone().contiguous() for k, v in policy.state_dict().items()}
+        state_dict = {
+            k: v.clone().contiguous() for k, v in model_or_state_dict.state_dict().items()
+        }
     save_file(state_dict, pretrained_dir / "model.safetensors")
 
     if preprocessor is not None:
@@ -126,7 +128,7 @@ def load_checkpoint(
     """
     from flagscale.train.processor import PolicyProcessorPipeline
 
-    print(f"Loading checkpoint from {checkpoint_dir}")
+    logger.info(f"Loading checkpoint from {checkpoint_dir}")
 
     if isinstance(checkpoint_dir, str):
         checkpoint_dir = Path(checkpoint_dir)
@@ -152,23 +154,23 @@ def load_checkpoint(
     # strict=False to handle tied weights saved as separate entries
     missing_keys, unexpected_keys = load_model(model, weights_path, device=device, strict=False)
     if missing_keys:
-        print(f"Warning: Missing keys when loading checkpoint: {len(missing_keys)} keys")
+        logger.warning(f"Missing keys when loading checkpoint: {len(missing_keys)} keys")
         if len(missing_keys) <= 10:
             for key in missing_keys:
-                print(f"  - {key}")
+                logger.warning(f"  - {key}")
         else:
             for key in missing_keys[:10]:
-                print(f"  - {key}")
-            print(f"  ... and {len(missing_keys) - 10} more")
+                logger.warning(f"  - {key}")
+            logger.warning(f"  ... and {len(missing_keys) - 10} more")
     if unexpected_keys:
-        print(f"Warning: Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
+        logger.warning(f"Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
         if len(unexpected_keys) <= 10:
             for key in unexpected_keys:
-                print(f"  - {key}")
+                logger.warning(f"  - {key}")
         else:
             for key in unexpected_keys[:10]:
-                print(f"  - {key}")
-            print(f"  ... and {len(unexpected_keys) - 10} more")
+                logger.warning(f"  - {key}")
+            logger.warning(f"  ... and {len(unexpected_keys) - 10} more")
 
     model.to(device)
 

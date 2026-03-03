@@ -46,7 +46,7 @@ class ActionModel(Protocol):
         """
         ...
 
-    def predict(
+    def predict_action(
         self, vlm_output: dict[str, Tensor], action_input: dict[str, Tensor], **kwargs
     ) -> dict[str, Tensor]:
         """
