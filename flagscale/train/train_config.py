@@ -198,7 +198,7 @@ class ModelConfig(BaseModel):
     model_config = {
         "extra": "allow",
         "arbitrary_types_allowed": True,
-    }  # Allow extra fields for model-specific config
+    }
 
     # Required fields to identify which model and checkpoint to use
     model_name: str = Field(..., description="Model name: 'pi0' or 'pi0.5'")

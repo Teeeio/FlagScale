@@ -1,28 +1,34 @@
-"""Optimizer setup utilities: parameter freezing and per-module optimizer config.
+"""Optimizer setup utilities.
 
 Supports:
 - Freezing parameters via regex patterns
 - Per-module optimizer settings (lr, weight_decay, betas, etc.) via config
-- LR scheduler nested under optimizer
+- LR scheduler via transformers.get_scheduler
 
 Example config (YAML):
     model:
       optimizer:
-        lr: 1e-4
-        weight_decay: 0.01
+        name: AdamW
+        lr: 2.5e-5
+        betas: [0.9, 0.95]
+        eps: 1.0e-08
+        weight_decay: 1.0e-08
         param_groups:
-          qwen_backbone:
-            lr: 1e-5
-          action_head:
-            lr: 2e-4
-            weight_decay: 0.0
+          vlm:
+            lr: 1.0e-05
+          action_model:
+            lr: 1.0e-04
         scheduler:
           name: cosine_with_min_lr
           warmup_steps: 5000
           scheduler_kwargs:
             min_lr: 1.0e-06
+
       freeze:
-        freeze_patterns: ["backbone.*"]
+        freeze_patterns:
+          - "qwen_vl_interface\\..*"
+        keep_patterns:
+          - "qwen_vl_interface\\.model\\.visual\\.merger\\..*"
 """
 
 import re
@@ -277,7 +283,7 @@ def setup_optimizer(
     freeze_config: "FreezeConfig | None" = None,
 ) -> torch.optim.Optimizer:
     """
-    One-stop setup: apply freeze config, build param groups, create optimizer.
+    Setup optimizer.
 
     Args:
         model: The model to optimize.
@@ -361,8 +367,8 @@ def setup_optimizer_and_scheduler(
 
     Args:
         model: The model to optimize.
-        train_config: TrainConfig containing model (optimizer, scheduler,
-            freeze config) and system (train_steps).
+        train_config: TrainConfig containing model (optimizer, scheduler, freeze config)
+            and system (train_steps).
 
     Returns:
         Tuple of (optimizer, lr_scheduler).
