@@ -17,11 +17,11 @@ from torch.distributions import Beta
 from transformers import PretrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 
-from flagscale.models.action_model.flow_matching_head.action_encoder import (
+from flagscale.models.action_model.flow_matching_head.cross_attention_dit import DiT
+from flagscale.models.action_model.flow_matching_head.encoding_utils import (
     SinusoidalPositionalEncoding,
     swish,
 )
-from flagscale.models.action_model.flow_matching_head.cross_attention_dit import DiT
 
 # TODO try to merge DiT Modules with follow_match_head, they are just the same arch, but diff loss, use diffusers package will be simple
 

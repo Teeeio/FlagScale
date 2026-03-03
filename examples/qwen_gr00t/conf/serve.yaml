@@ -11,9 +11,9 @@ experiment:
   runner:
     hostfile: null
     deploy:
-      use_fs_serve: false
+      use_fs_serve: true
   envs:
-    CUDA_VISIBLE_DEVICES: 3
+    CUDA_VISIBLE_DEVICES: 0
     CUDA_DEVICE_MAX_CONNECTIONS: 1
 
 action: run

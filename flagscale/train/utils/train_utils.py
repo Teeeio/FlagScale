@@ -140,7 +140,8 @@ def load_checkpoint(
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
     config = OmegaConf.load(config_path)
-    # Inject pretrained_dir so downstream model init can locate weight files
+    # Set _pretrained_dir so OmegaConf resolves ${_pretrained_dir} interpolations
+    # (e.g., model.qwenvl.base_vlm saved as "${_pretrained_dir}/vlm_config")
     OmegaConf.update(config, "_pretrained_dir", str(pretrained_dir))
 
     model = model_cls(config)

@@ -44,13 +44,16 @@ class QwenVLBackbone(nn.Module):
         super().__init__()
         qwenvl_config = config.model.qwenvl
         self.model_id = qwenvl_config.base_vlm
+        # When loading from checkpoint, base_vlm is resolved via OmegaConf
+        # interpolation: "${_pretrained_dir}/vlm_config" → absolute path.
         self._load_pretrained = qwenvl_config.get("load_pretrained", True)
         self._attn_implementation = qwenvl_config.get("attn_implementation", None)
 
-        if not Path(self.model_id).is_absolute():
-            pretrained_dir = config.get("_pretrained_dir", "")
-            if pretrained_dir:
-                self.model_id = str(Path(pretrained_dir) / self.model_id)
+        if not self._load_pretrained and not Path(self.model_id).exists():
+            raise FileNotFoundError(
+                f"VLM config directory not found: {self.model_id}. "
+                "Ensure the checkpoint was saved with save_pretrained_artifacts."
+            )
 
         # TODO: (yupu) The model loaded by `from_pretrained` is eval mode by default, is this expected? I removed `policy.train()` in train_qwen_gr00t.py to match starVLA, but not sure if this is the right way to do this.
         self.model = self._load_model(self.model_id)
@@ -91,9 +94,10 @@ class Qwen25VLBackbone(QwenVLBackbone):
     def _load_model(self, model_id: str):
         attn_impl = self._attn_implementation or "flash_attention_2"
         if not self._load_pretrained:
-            hf_config = AutoConfig.from_pretrained(model_id, attn_implementation=attn_impl)
+            hf_config = AutoConfig.from_pretrained(
+                model_id, attn_implementation=attn_impl, torch_dtype="auto"
+            )
             return Qwen2_5_VLForConditionalGeneration(hf_config)
-        # WARNING: hard-coded torch_dtype matches starVLA
         return Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_id,
             attn_implementation=attn_impl,
@@ -178,7 +182,9 @@ class Qwen3VLBackbone(QwenVLBackbone):
     def _load_model(self, model_id: str) -> Qwen3VLForConditionalGeneration:
         attn_impl = self._attn_implementation or "flash_attention_2"
         if not self._load_pretrained:
-            hf_config = AutoConfig.from_pretrained(model_id, attn_implementation=attn_impl)
+            hf_config = AutoConfig.from_pretrained(
+                model_id, attn_implementation=attn_impl, torch_dtype=torch.bfloat16
+            )
             model = Qwen3VLForConditionalGeneration(hf_config)
         else:
             # FIXME: hard-coded torch_dtype matches starVLA

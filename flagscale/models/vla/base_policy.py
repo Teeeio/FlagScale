@@ -15,7 +15,8 @@ class TrainablePolicy(nn.Module, ABC):
 
     Optional overrides:
         image_features — derived from input_features by filtering FeatureType.VISUAL
-        save_pretrained_configs(save_dir) — persist architecture configs for checkpoint portability
+        checkpoint_config_overrides() — config patches for checkpoint portability
+        save_pretrained_artifacts(save_dir) — persist non-weight artifacts (e.g., VLM config)
     """
 
     def __init__(self):
@@ -53,10 +54,18 @@ class TrainablePolicy(nn.Module, ABC):
             key: ft for key, ft in self._input_features.items() if ft.type is FeatureType.VISUAL
         }
 
-    def save_pretrained_configs(self, save_dir: Path) -> None:
-        """Save configs needed to reconstruct architecture without pretrained weights.
+    def checkpoint_config_overrides(self) -> dict:
+        """Return config patches applied to train_config.yaml at checkpoint save time.
 
-        Override for models with heavy pretrained components (e.g., VLM backbone).
-        Called by save_checkpoint.
+        Override for models that need to adjust config for checkpoint loading
+        (e.g., switching from pretrained VLM download to local config-only init).
+        """
+        return {}
+
+    def save_pretrained_artifacts(self, save_dir: Path) -> None:
+        """Save non-weight artifacts needed to reconstruct architecture from checkpoint.
+
+        Override for models with heavy pretrained components (e.g., VLM config/processor).
+        Called before save_checkpoint so artifacts exist when the config references them.
         """
         pass

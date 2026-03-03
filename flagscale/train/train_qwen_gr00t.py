@@ -572,15 +572,18 @@ def main(config: TrainConfig, seed: int):
                 checkpoint_dir = get_step_checkpoint_dir(
                     output_dir, config.system.train_steps, step
                 )
+                pretrained_dir = checkpoint_dir / PRETRAINED_MODEL_DIR
+                policy.save_pretrained_artifacts(pretrained_dir)
+                ckpt_config = OmegaConf.merge(
+                    config, policy.checkpoint_config_overrides()
+                )
                 save_checkpoint(
                     checkpoint_dir=checkpoint_dir,
                     policy=state_dict,
-                    config=config,
+                    config=ckpt_config,
                     preprocessor=preprocessor,
                     postprocessor=postprocessor,
                 )
-                # TODO: (yupu) Maybe fold into save_checkpoint once it accepts the policy object
-                policy.save_pretrained_configs(checkpoint_dir / PRETRAINED_MODEL_DIR)
                 update_last_checkpoint(checkpoint_dir)
 
             dist.barrier()
