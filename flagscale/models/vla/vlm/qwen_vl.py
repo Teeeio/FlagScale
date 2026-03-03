@@ -1,6 +1,8 @@
 # Mainly adopted from:
 # https://github.com/starVLA/starVLA/blob/3f7feefbc5fc25890ad3a7d262b8a0aea1339aa7/starVLA/model/modules/vlm/QWen3.py
 
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -43,6 +45,12 @@ class QwenVLBackbone(nn.Module):
         qwenvl_config = config.model.qwenvl
         self.model_id = qwenvl_config.base_vlm
         self._load_pretrained = qwenvl_config.get("load_pretrained", True)
+        self._attn_implementation = qwenvl_config.get("attn_implementation", None)
+
+        if not Path(self.model_id).is_absolute():
+            pretrained_dir = config.get("_pretrained_dir", "")
+            if pretrained_dir:
+                self.model_id = str(Path(pretrained_dir) / self.model_id)
 
         # TODO: (yupu) The model loaded by `from_pretrained` is eval mode by default, is this expected? I removed `policy.train()` in train_qwen_gr00t.py to match starVLA, but not sure if this is the right way to do this.
         self.model = self._load_model(self.model_id)
@@ -81,13 +89,14 @@ class Qwen25VLBackbone(QwenVLBackbone):
     """Qwen2.5-VL backend."""
 
     def _load_model(self, model_id: str):
+        attn_impl = self._attn_implementation or "flash_attention_2"
         if not self._load_pretrained:
-            hf_config = AutoConfig.from_pretrained(model_id)
+            hf_config = AutoConfig.from_pretrained(model_id, attn_implementation=attn_impl)
             return Qwen2_5_VLForConditionalGeneration(hf_config)
-        # WARNING: hard-coded attn_implementation and torch_dtype
+        # WARNING: hard-coded torch_dtype matches starVLA
         return Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_id,
-            attn_implementation="flash_attention_2",
+            attn_implementation=attn_impl,
             torch_dtype="auto",
         )
 
@@ -167,14 +176,15 @@ class Qwen3VLBackbone(QwenVLBackbone):
     """Qwen3-VL backend."""
 
     def _load_model(self, model_id: str) -> Qwen3VLForConditionalGeneration:
+        attn_impl = self._attn_implementation or "flash_attention_2"
         if not self._load_pretrained:
-            hf_config = AutoConfig.from_pretrained(model_id)
+            hf_config = AutoConfig.from_pretrained(model_id, attn_implementation=attn_impl)
             model = Qwen3VLForConditionalGeneration(hf_config)
         else:
-            # FIXME: hard-coded attn_implementation and torch_dtype matches starVLA
+            # FIXME: hard-coded torch_dtype matches starVLA
             model = Qwen3VLForConditionalGeneration.from_pretrained(
                 model_id,
-                attn_implementation="flash_attention_2",
+                attn_implementation=attn_impl,
                 torch_dtype=torch.bfloat16,
             )
         # Align dims qwen3 with qwen2.5, actually it's not needed in our case

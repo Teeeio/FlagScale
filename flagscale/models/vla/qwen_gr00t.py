@@ -205,7 +205,7 @@ class QwenGr00t(TrainablePolicy):
             )
         saved_config = OmegaConf.load(config_path)
         OmegaConf.update(saved_config, "model.qwenvl.load_pretrained", False)
-        OmegaConf.update(saved_config, "model.qwenvl.base_vlm", str(vlm_config_dir))
+        OmegaConf.update(saved_config, "model.qwenvl.base_vlm", VLM_CONFIG_DIR)
         OmegaConf.update(
             saved_config,
             "model.input_features",
