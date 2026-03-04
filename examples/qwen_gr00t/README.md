@@ -117,7 +117,7 @@ vim examples/qwen_gr00t/conf/train.yaml
 
 Configure the following fields:
 
-- `experiment.envs.CUDA_VISIBLE_DEVICES` - GPU devices to use (e.g., `"0,1,2,3"` for 4 GPUs, `"0,1"` for 2 GPUs)
+- `experiment.envs.CUDA_VISIBLE_DEVICES` - GPU devices to use (default: `"0,1,2,3,4,5,6,7"` for 8 GPUs)
 - `experiment.envs.CUDA_DEVICE_MAX_CONNECTIONS` - Connection limit (typically `1`)
 - `experiment.exp_name` - Experiment name
 - `experiment.exp_dir` - Output directory for checkpoints and logs
@@ -141,7 +141,7 @@ Configure the following fields:
 - `system.shuffle` - Whether to shuffle training data (default: `true`)
 - `system.num_workers` - Number of data loading workers (default: `4`)
 - `system.checkpoint.save_checkpoint` - Whether to save checkpoints (default: `true`)
-- `system.checkpoint.save_freq` - Steps between checkpoints (default: `10000`)
+- `system.checkpoint.save_freq` - Steps between checkpoints (default: `1000`)
 - `system.checkpoint.output_directory` - Checkpoint output directory (default: `${experiment.exp_dir}`)
 
 **Model settings**:
@@ -152,6 +152,7 @@ Configure the following fields:
 - `model.qwenvl.attn_implementation` - Attention implementation (default: `"flash_attention_2"`)
 - `model.qwenvl.vl_hidden_dim` - VLM hidden dimension (default: `2048`)
 - `model.dino.dino_backbone` - DINOv2 backbone variant (default: `"dinov2_vits14"`)
+- `model.action_model.use_state` - Whether to condition the action model on proprioceptive state (default: `false`)
 - `model.action_model.type` - Action model type (default: `"flow_matching"`)
 - `model.action_model.action_model_type` - DiT variant (default: `"DiT-B"`)
 - `model.action_model.action_dim` - Action dimension (default: `7`)
@@ -289,7 +290,7 @@ Configure the following fields:
 
 **Engine arguments:**
 - `engine_args.host` - Server host (default: `"0.0.0.0"`)
-- `engine_args.port` - Server port (default: `6000`)
+- `engine_args.port` - Server port (default: `5000`)
 - `engine_args.model_variant` - Model variant (default: `"QwenGr00t"`)
 - `engine_args.model` - Path to trained checkpoint (e.g., `/workspace/outputs/qwen_gr00t_train/checkpoints/last`)
 - `engine_args.device` - Device to use (e.g., `"cuda"`)
