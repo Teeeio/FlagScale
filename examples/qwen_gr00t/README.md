@@ -206,7 +206,7 @@ model:
 ### Start Training
 ```sh
 cd FlagScale/
-python run.py --config-path ./examples/qwen_gr00t/conf --config-name train action=run
+flagscale train qwen_gr00t -c ./examples/qwen_gr00t/conf/train.yaml
 ```
 
 Training logs are saved to `outputs/<exp_name>/logs/host_0_localhost.output` by default.
@@ -216,7 +216,7 @@ Checkpoints are saved to `${experiment.exp_dir}/checkpoints`.
 ### Stop Training
 ```sh
 cd FlagScale/
-python run.py --config-path ./examples/qwen_gr00t/conf --config-name train action=stop
+flagscale train qwen_gr00t --stop
 ```
 
 ## Inference
@@ -267,10 +267,7 @@ Configure the following fields:
 
 ```sh
 cd FlagScale/
-python run.py \
-    --config-path ./examples/qwen_gr00t/conf \
-    --config-name inference \
-    action=run
+flagscale inference qwen_gr00t -c ./examples/qwen_gr00t/conf/inference.yaml
 ```
 
 Inference logs are saved to `outputs/qwen_gr00t_inference/inference_logs/host_0_localhost.output` by default.
@@ -299,7 +296,7 @@ Configure the following fields:
 
 ```sh
 cd FlagScale/
-python run.py --config-path ./examples/qwen_gr00t/conf --config-name serve action=run
+flagscale serve qwen_gr00t -c ./examples/qwen_gr00t/conf/serve.yaml
 ```
 
 Serving logs are saved to `outputs/<exp_name>/logs/host_0_localhost.output` by default.
@@ -308,5 +305,5 @@ Serving logs are saved to `outputs/<exp_name>/logs/host_0_localhost.output` by d
 
 ```sh
 cd FlagScale/
-python run.py --config-path ./examples/qwen_gr00t/conf --config-name serve action=stop
+flagscale serve qwen_gr00t --stop
 ```
