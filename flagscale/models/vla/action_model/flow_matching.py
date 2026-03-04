@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
 
-from flagscale.models.action_model.gr00t_action_header import (
+from flagscale.models.utils.constants import ACTION
+from flagscale.models.vla.action_model.gr00t_action_header import (
     FlowmatchingActionHead as _FlowmatchingActionHead,
 )
-from flagscale.models.utils.constants import ACTION
 from flagscale.models.vla.utils import get_vlm_config
 from flagscale.train.train_config import TrainConfig
 

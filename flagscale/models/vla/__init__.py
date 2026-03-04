@@ -1,4 +1,4 @@
-from .action_models.flow_matching import FlowMatchingHead
+from .action_model.flow_matching import FlowMatchingHead
 from .protocols import ActionModel, VLMBackbone
 from .qwen_gr00t import QwenGr00t
 from .registry import (

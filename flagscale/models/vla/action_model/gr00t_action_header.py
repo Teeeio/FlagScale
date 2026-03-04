@@ -17,8 +17,8 @@ from torch.distributions import Beta
 from transformers import PretrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 
-from flagscale.models.action_model.flow_matching_head.cross_attention_dit import DiT
-from flagscale.models.action_model.flow_matching_head.encoding_utils import (
+from flagscale.models.vla.action_model.flow_matching_head.cross_attention_dit import DiT
+from flagscale.models.vla.action_model.flow_matching_head.encoding_utils import (
     SinusoidalPositionalEncoding,
     swish,
 )

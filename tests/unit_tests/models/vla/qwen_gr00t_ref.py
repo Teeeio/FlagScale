@@ -17,8 +17,8 @@ import numpy as np
 import torch
 from transformers import PretrainedConfig, PreTrainedModel
 
-from flagscale.models.action_model.gr00t_action_header import FlowmatchingActionHead
 from flagscale.models.utils.constants import ACTION, OBS_STATE
+from flagscale.models.vla.action_model.gr00t_action_header import FlowmatchingActionHead
 
 # from flagscale.models.vlm.qwen2_5_vl import _QWen_VL_Interface
 from flagscale.models.vlm.qwen3_vl import _QWen3_VL_Interface
