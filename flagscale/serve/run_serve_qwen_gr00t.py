@@ -37,14 +37,13 @@ class Policy:
         logger.info(f"Policy model loading latency: {time.perf_counter() - t_s:.2f}s")
 
     def inference(self, batch):
-        # FIXME: image reisze
         logger.info("Start to inference")
-        print(f"batch: {batch}")
-        # TODO: (yupu) remove hard-code
-        batch = batch["examples"][0]
-        for k, v in batch.items():
-            if "image" in k:
-                print(f"{k}: type {type(v)} shape {v.shape}")
+        # {
+        #     "observation.images.image": np.ndarray, shape=(224, 224, 3), dtype=uint8,
+        #     "observation.images.wrist_image": np.ndarray, shape=(224, 224, 3), dtype=uint8,
+        #     "task": str,
+        # }
+        # NOTE: Images must be 224x224 resolution (uint8 HWC format).
         batch = self.preprocessor(batch)
 
         with torch.no_grad():
@@ -83,7 +82,7 @@ def main(config):
         port=policy.port,
         metadata={"env": "simpler_env"},
     )
-    logger.info("server running ...")
+    logger.info("Server running ...")
     server.serve_forever()
 
 

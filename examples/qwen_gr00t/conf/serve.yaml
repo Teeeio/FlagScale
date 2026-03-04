@@ -3,7 +3,7 @@ defaults:
 - serve: qwen_gr00t
 
 experiment:
-  exp_name: 0228_qwen_gr00t_train_test_refactor
+  exp_name: qwen_gr00t_serve
   exp_dir: outputs/${experiment.exp_name}
   task:
     type: serve
