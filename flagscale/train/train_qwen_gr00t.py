@@ -552,7 +552,7 @@ def main(config: TrainConfig, seed: int):
             epoch += 1
             sampler.set_epoch(epoch)
 
-        if step % config.system.log_freq == 0 and is_main_process:
+        if step % config.system.log_freq == 0:
             logger.info(f"step: {step} {format_train_tracker_step(train_tracker)}")
             train_tracker.reset_averages()
 
@@ -575,7 +575,8 @@ def main(config: TrainConfig, seed: int):
                 pretrained_dir = checkpoint_dir / PRETRAINED_MODEL_DIR
                 policy.save_pretrained_artifacts(pretrained_dir)
                 ckpt_config = OmegaConf.merge(
-                    config, policy.checkpoint_config_overrides()
+                    config.to_omegaconf(),
+                    policy.checkpoint_config_overrides(),
                 )
                 save_checkpoint(
                     checkpoint_dir=checkpoint_dir,

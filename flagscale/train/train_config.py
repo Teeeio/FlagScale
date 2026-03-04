@@ -247,6 +247,14 @@ class TrainConfig(BaseModel):
         train_dict["model"] = ModelConfig(**train_dict["model"], raw=train.model)
         return cls(**train_dict)
 
+    def to_omegaconf(self) -> DictConfig:
+        """Reconstruct the full OmegaConf config from stored raw DictConfigs."""
+        return OmegaConf.create({
+            "system": self.system.raw,
+            "model": self.model.raw,
+            "data": self.data.raw,
+        })
+
     class Config:
         # Allow arbitrary types for complex objects
         arbitrary_types_allowed = True
