@@ -1,22 +1,22 @@
 import argparse
 import importlib
 
+import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
-from torchvision import transforms
 
 from flagscale.logger import logger
 from flagscale.models.utils.constants import OBS_STATE
 from flagscale.train.utils.train_utils import load_checkpoint
 
 
-def load_image(image_path: str) -> torch.Tensor:
+def load_image(image_path: str, size: tuple[int, int] | None = None) -> torch.Tensor:
     img = Image.open(image_path).convert("RGB")
-    img_tensor = transforms.ToTensor()(img)
-    if img_tensor.dim() == 3:
-        img_tensor = img_tensor.unsqueeze(0)
-    return img_tensor
+    if size is not None:
+        img = img.resize(size)
+    # uint8 HWC, matching the training pipeline
+    return torch.from_numpy(np.array(img)).unsqueeze(0)
 
 
 def load_state_from_file(state_path: str) -> torch.Tensor:
@@ -33,7 +33,6 @@ def run_inference(config_path: str):
     engine_cfg = cfg.engine
     generate_cfg = cfg.generate
 
-    # TODO: (yupu) Use `PreTrainedModel` for save/load
     model_variant = engine_cfg.model_variant
     policy = getattr(importlib.import_module("flagscale.models.vla"), model_variant)
     model, preprocessor, postprocessor = load_checkpoint(
@@ -42,7 +41,6 @@ def run_inference(config_path: str):
 
     # TODO: (yupu): model.to(dtype)?
 
-    # FIXME: images are not resized
     images = generate_cfg.images
     state_path = generate_cfg.get("state_path")
     task_path = generate_cfg.get("task_path")
@@ -51,7 +49,7 @@ def run_inference(config_path: str):
     logger.info(f"Loading {len(image_keys)} images...")
     loaded_images = {}
     for img_key, img_path in images.items():
-        img = load_image(img_path)
+        img = load_image(img_path, size=(224, 224))
         loaded_images[img_key] = img
         logger.info(f"Loaded image: {img_key} from {img_path} with shape {img.shape}")
 
@@ -70,11 +68,6 @@ def run_inference(config_path: str):
     batch[OBS_STATE] = state
     batch["task"] = [prompt]
 
-    # batch = {
-    #     k: v.to(engine_cfg.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
-    #     for k, v in batch.items()
-    # }
-
     logger.info("Preprocessing batch...")
     batch = preprocessor(batch)
 
@@ -88,8 +81,7 @@ def run_inference(config_path: str):
     logger.info(f"action after postprocessor: {action}")
 
     logger.info(f"Final action: {action}")
-
-    print("done")
+    logger.info("done")
 
 
 def main():

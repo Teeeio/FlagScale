@@ -36,7 +36,7 @@ from flagscale.train.utils.logging_utils import (
     format_big_number,
 )
 from flagscale.train.utils.train_utils import (
-    save_checkpoint,
+    save_vla_checkpoint,
     get_step_checkpoint_dir,
     update_last_checkpoint,
 )
@@ -578,7 +578,7 @@ def main(config: TrainConfig, seed: int):
                     config.to_omegaconf(),
                     policy.checkpoint_config_overrides(),
                 )
-                save_checkpoint(
+                save_vla_checkpoint(
                     checkpoint_dir=checkpoint_dir,
                     model_or_state_dict=state_dict,
                     config=ckpt_config,

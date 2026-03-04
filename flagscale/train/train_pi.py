@@ -748,7 +748,7 @@ def main(config: TrainConfig, seed: int):
                 policy_to_save = policy.module
                 save_checkpoint(
                     checkpoint_dir=checkpoint_dir,
-                    model_or_state_dict=policy_to_save,
+                    policy=policy_to_save,
                 )
                 update_last_checkpoint(checkpoint_dir)
 

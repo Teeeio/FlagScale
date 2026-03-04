@@ -97,7 +97,8 @@ class Qwen25VLBackbone(QwenVLBackbone):
             hf_config = AutoConfig.from_pretrained(
                 model_id, attn_implementation=attn_impl, torch_dtype="auto"
             )
-            return Qwen2_5_VLForConditionalGeneration(hf_config)
+            with torch.device("meta"):
+                return Qwen2_5_VLForConditionalGeneration(hf_config)
         return Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_id,
             attn_implementation=attn_impl,
@@ -175,7 +176,8 @@ class Qwen3VLBackbone(QwenVLBackbone):
             hf_config = AutoConfig.from_pretrained(
                 model_id, attn_implementation=attn_impl, torch_dtype=torch.bfloat16
             )
-            model = Qwen3VLForConditionalGeneration(hf_config)
+            with torch.device("meta"):
+                model = Qwen3VLForConditionalGeneration(hf_config)
         else:
             # FIXME: hard-coded torch_dtype matches starVLA
             model = Qwen3VLForConditionalGeneration.from_pretrained(

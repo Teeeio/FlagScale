@@ -58,7 +58,28 @@ def update_last_checkpoint(checkpoint_dir: Path) -> Path:
     last_checkpoint_dir.symlink_to(relative_target)
 
 
-def save_checkpoint(
+def save_checkpoint(checkpoint_dir: Path, policy) -> None:
+    """This function creates the following directory structure:
+
+    005000/  #  training step at checkpoint
+    ├── pretrained_model/
+    │   ├── config.json  # policy config
+    │   ├── model.safetensors  # policy weights
+    │   ├── train_config.json  # train config
+    │   ├── processor.json  # processor config (if preprocessor provided)
+    │   └── step_*.safetensors  # processor state files (if any)
+    └── training_state/
+        ├── optimizer_param_groups.json  #  optimizer param groups
+        ├── optimizer_state.safetensors  # optimizer state
+        ├── rng_state.safetensors  # rng states
+        ├── scheduler_state.json  # scheduler state
+        └── training_step.json  # training step
+    """
+    pretrained_dir = checkpoint_dir / PRETRAINED_MODEL_DIR
+    policy.save_pretrained(pretrained_dir)
+
+
+def save_vla_checkpoint(
     checkpoint_dir: Path,
     model_or_state_dict,
     config,
@@ -147,6 +168,11 @@ def load_checkpoint(
     OmegaConf.update(config, "_pretrained_dir", str(pretrained_dir))
 
     model = model_cls(config)
+
+    # Materialize any meta tensors (from torch.device("meta") init) before loading weights.
+    has_meta = any(p.is_meta for p in model.parameters())
+    if has_meta:
+        model.to_empty(device=device)
 
     weights_path = pretrained_dir / "model.safetensors"
     if not weights_path.exists():
