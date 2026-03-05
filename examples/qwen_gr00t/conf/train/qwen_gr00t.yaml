@@ -112,6 +112,11 @@ model:
   #   #   - "action_model\\.action_decoder\\..*"
 
 data:
+  dataset_type: lerobot
+  wds:
+    vision_root: ""
+    action_key: eepose
+    state_key: eepose
   # TODO: (yupu) Remove this once we have a proper dataset config
   vla_data:
     dataset_py: lerobot_datasets

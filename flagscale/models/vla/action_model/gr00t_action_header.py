@@ -278,20 +278,24 @@ class FlowmatchingActionHead(nn.Module):
         actions: torch.Tensor,
         state: torch.Tensor = None,
         encoder_attention_mask=None,
+        mask: torch.Tensor = None,
     ):
         """
         vl_embs: shape (B, seq_length, feature_dim)
         actions: shape (B, future_action_window_size, D_action)
+        mask: optional shape (B, future_action_window_size), True for real timesteps
         """
         device = vl_embs.device
 
-        # Validate action dimension
-        if actions.shape[-1] != self.action_dim:
-            raise ValueError(
-                f"Action dimension mismatch: model expects {self.action_dim} dimensions "
-                f"(from config), but received actions with {actions.shape[-1]} dimensions. "
-                f"Please update config.model.action_model.action_dim to match your data."
+        # Check if we need to pad actions to match model's action_dim
+        if actions.shape[-1] < self.action_dim:
+            padding = torch.zeros(
+                (*actions.shape[:-1], self.action_dim - actions.shape[-1]),
+                device=actions.device,
+                dtype=actions.dtype,
             )
+            actions = torch.cat([actions, padding], dim=-1)
+
         # Embed noised action trajectory.
         noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
 
@@ -332,8 +336,12 @@ class FlowmatchingActionHead(nn.Module):
         pred = self.action_decoder(model_output)
         pred_actions = pred[:, -actions.shape[1] :]
 
-        # Slice out only the action portion of pred and target.
-        loss = ((pred_actions - velocity) ** 2).mean()
+        raw_loss = (pred_actions - velocity) ** 2
+        if mask is not None:
+            # mask: [B, T], raw_loss: [B, T, D]
+            loss = (raw_loss * mask.unsqueeze(-1)).sum() / (mask.sum() * raw_loss.shape[-1] + 1e-6)
+        else:
+            loss = raw_loss.mean()
         return loss
 
     @torch.no_grad()

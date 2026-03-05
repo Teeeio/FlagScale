@@ -81,16 +81,16 @@ class QwenGr00t(TrainablePolicy):
         if isinstance(batch, list):  # wds: list of per-sample dicts
             images = [ex["image"] for ex in batch]
             instructions = [ex["lang"] for ex in batch]
-            actions = torch.stack([ex["action"] for ex in batch])
+            actions = [ex["action"] for ex in batch]
             if self.use_state and "state" in batch[0]:
-                state = torch.stack([ex["state"] for ex in batch])
+                state = [ex["state"] for ex in batch]
             else:
                 state = None
         else:  # lerobot: single dict with batched tensors
             images, instructions = self.vlm.prepare_input(
                 batch, image_feature_keys=list(self.image_features.keys())
             )
-            actions = batch[ACTION]
+            actions = [batch[ACTION][i] for i in range(batch[ACTION].shape[0])]
             state = batch.get(OBS_STATE) if self.use_state else None
 
         qwen_inputs = self.vlm.build_qwenvl_inputs(images, instructions)
@@ -101,15 +101,38 @@ class QwenGr00t(TrainablePolicy):
             # last_hidden_state: [B, seq_len, H]
             last_hidden = vlm_output["hidden_states"][-1]  # [B, L, H]
 
-        # Step 4: Action Expert Forward and Loss
+        target_horizon = self._config.model.action_model.action_horizon
+        target_dim = self._config.model.action_model.action_dim
+
+        padded_actions = []
+        action_masks = []
+        for a in actions:
+            a = a.float()
+            T_orig = a.shape[0]
+
+            # 1. Align action dimension (padding or truncating)
+            if a.shape[-1] != target_dim:
+                aligned = torch.zeros(T_orig, target_dim, dtype=a.dtype)
+                copy_dim = min(a.shape[-1], target_dim)
+                aligned[:, :copy_dim] = a[:, :copy_dim]
+                a = aligned
+
+            # 2. Time dimension padding
+            final_a = torch.zeros(target_horizon, target_dim, dtype=a.dtype)
+            mask = torch.zeros(target_horizon, dtype=torch.bool)
+            copy_T = min(T_orig, target_horizon)
+            final_a[:copy_T] = a[:copy_T]
+            mask[:copy_T] = True
+
+            padded_actions.append(final_a)
+            action_masks.append(mask)
+
         with torch.autocast("cuda", dtype=torch.float32):
             # TODO: (yupu) Is this a bug or a feature? The action dtype would stay as bf16 under this autocast.
-            actions = actions.to(device=last_hidden.device, dtype=last_hidden.dtype)
-
-            # TODO: does not match RoboBrainX, need to check
-            actions_target = actions[
-                :, -(self.future_action_window_size + 1) :, :
-            ]  # (B, chunk_len, action_dim)
+            actions = torch.stack(padded_actions).to(
+                device=last_hidden.device, dtype=last_hidden.dtype
+            )
+            action_masks = torch.stack(action_masks).to(device=last_hidden.device)
 
             # TODO: (yupu) I believe there is a bug in starVLA, the
             # `repeated_diffusion_steps` is not properly set in the config.
@@ -117,16 +140,23 @@ class QwenGr00t(TrainablePolicy):
                 "repeated_diffusion_steps", 4
             )
 
-            actions_repeated = actions_target.repeat(repeated_diffusion_steps, 1, 1)
+            actions_repeated = actions.repeat(repeated_diffusion_steps, 1, 1)
             last_hidden_repeated = last_hidden.repeat(repeated_diffusion_steps, 1, 1)
+            action_masks_repeated = action_masks.repeat(repeated_diffusion_steps, 1)
 
             state_repeated = None
             if state is not None:
+                if isinstance(state, list):
+                    state = torch.stack(state)
                 state = state.to(device=last_hidden.device, dtype=last_hidden.dtype)
                 state_repeated = state.repeat(repeated_diffusion_steps, 1, 1)
 
             vlm_output_repeated = {"hidden_states": last_hidden_repeated}
-            action_input = {"actions": actions_repeated, "state": state_repeated}
+            action_input = {
+                "actions": actions_repeated,
+                "state": state_repeated,
+                "mask": action_masks_repeated,
+            }
 
             output = self.action_model.forward(vlm_output_repeated, action_input)
 

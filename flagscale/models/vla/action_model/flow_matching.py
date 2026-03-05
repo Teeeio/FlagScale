@@ -43,12 +43,14 @@ class FlowMatchingHead(nn.Module):
         actions = action_input["actions"]
         state = action_input.get("state")
         encoder_attention_mask = action_input.get("attention_mask")
+        mask = action_input.get("mask")
 
         loss = self._head.forward(
             vl_embs=vl_embs,
             actions=actions,
             state=state,
             encoder_attention_mask=encoder_attention_mask,
+            mask=mask,
         )
         return {"loss": loss}
 
