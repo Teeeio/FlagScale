@@ -167,6 +167,7 @@ class DataConfig(BaseModel):
 
     model_config = {"extra": "allow", "arbitrary_types_allowed": True}
 
+    dataset_type: str = "lerobot"
     data_path: str = Field(..., description="Path to training dataset")
     tolerance_s: float = 0.0001
     use_imagenet_stats: bool = True

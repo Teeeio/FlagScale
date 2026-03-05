@@ -420,64 +420,40 @@ def main(config: TrainConfig, seed: int):
     world_size = dist.get_world_size()
     is_main_process = rank == 0
 
-    dataset = make_dataset(config.data)
-    dist.barrier()
+    if config.data.dataset_type == "wds":
+        from megatron.energon import get_train_dataset, get_loader, WorkerConfig
+        from flagscale.models.vla.qwen_gr00t_task_encoder import TaskEncoder
 
-    policy = make_policy(config=config, ds_meta=dataset.meta)
-    dist.barrier()
+        policy = QwenGr00t(config=config)
+        policy.to("cuda")
 
-    # --- Apply FSDP2 ---
-    device_mesh = init_device_mesh("cuda", (world_size,))
-    apply_fsdp2(policy, device_mesh)
-
-    # Create processors - only provide dataset_stats if not resuming from saved processors
-    preprocessor_overrides = {
-        "device_processor": {"device": device.type},
-        "normalizer_processor": {
-            "stats": dataset.meta.stats,
-            "features": {
-                **policy.input_features,
-                **policy.output_features,
-            },
-        },
-    }
-
-    num_workers = 0  # config.system.num_workers
-    shuffle = config.system.shuffle
-
-    # DistributedSampler ensures each rank gets different data
-    sampler = torch.utils.data.distributed.DistributedSampler(
-        dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=shuffle,
-        drop_last=False,
-    )
-
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        num_workers=num_workers,
-        batch_size=config.system.batch_size,
-        shuffle=False,  # Must be False when using sampler
-        sampler=sampler,
-        pin_memory=True,
-        drop_last=False,
-        prefetch_factor=2 if num_workers > 0 else None,
-    )
-
-    # Setup preprocessor
-    preprocessor = None
-    if config.data.preprocessor is not None:
-        preprocessor = make_preprocessor_from_config(
-            config.data.preprocessor, overrides=preprocessor_overrides
+        ds = get_train_dataset(
+            config.data.data_path,
+            batch_size=config.system.batch_size,
+            task_encoder=TaskEncoder(config.data.wds),
+            worker_config=WorkerConfig.default_worker_config(
+                num_workers=config.system.num_workers,
+            ),
+            repeat=True,
         )
+        dataloader = get_loader(ds)
+        dl_iter = iter(dataloader)
+        preprocessor = None
+        postprocessor = None
+        sampler = None
+        num_frames = 0
+        num_episodes = 0
+    else:
+        dataset = make_dataset(config.data)
+        dist.barrier()
 
-    # Setup postprocessor (unnormalization for inference)
-    postprocessor = None
-    postprocessor_config = getattr(config.data, "postprocessor", None)
-    if postprocessor_config is not None:
-        postprocessor_overrides = {
-            "unnormalizer_processor": {
+        policy = make_policy(config=config, ds_meta=dataset.meta)
+        dist.barrier()
+
+        # Create processors - only provide dataset_stats if not resuming from saved processors
+        preprocessor_overrides = {
+            "device_processor": {"device": device.type},
+            "normalizer_processor": {
                 "stats": dataset.meta.stats,
                 "features": {
                     **policy.input_features,
@@ -485,16 +461,66 @@ def main(config: TrainConfig, seed: int):
                 },
             },
         }
-        postprocessor = make_preprocessor_from_config(
-            postprocessor_config, overrides=postprocessor_overrides
+
+        num_workers = 0  # config.system.num_workers
+        shuffle = config.system.shuffle
+
+        # DistributedSampler ensures each rank gets different data
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=shuffle,
+            drop_last=False,
         )
+
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            num_workers=num_workers,
+            batch_size=config.system.batch_size,
+            shuffle=False,  # Must be False when using sampler
+            sampler=sampler,
+            pin_memory=True,
+            drop_last=False,
+            prefetch_factor=2 if num_workers > 0 else None,
+        )
+
+        # Setup preprocessor
+        preprocessor = None
+        if config.data.preprocessor is not None:
+            preprocessor = make_preprocessor_from_config(
+                config.data.preprocessor, overrides=preprocessor_overrides
+            )
+
+        # Setup postprocessor (unnormalization for inference)
+        postprocessor = None
+        postprocessor_config = getattr(config.data, "postprocessor", None)
+        if postprocessor_config is not None:
+            postprocessor_overrides = {
+                "unnormalizer_processor": {
+                    "stats": dataset.meta.stats,
+                    "features": {
+                        **policy.input_features,
+                        **policy.output_features,
+                    },
+                },
+            }
+            postprocessor = make_preprocessor_from_config(
+                postprocessor_config, overrides=postprocessor_overrides
+            )
+
+        dl_iter = cycle(dataloader)
+        num_frames = dataset.num_frames
+        num_episodes = dataset.num_episodes
+
+    # --- Apply FSDP2 ---
+    device_mesh = init_device_mesh("cuda", (world_size,))
+    apply_fsdp2(policy, device_mesh)
 
     # Setup optimizer and scheduler (applies freeze config internally)
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(policy, config)
 
     dist.barrier()
-
-    dl_iter = cycle(dataloader)
 
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),
@@ -510,24 +536,28 @@ def main(config: TrainConfig, seed: int):
 
     train_tracker = MetricsTracker(
         effective_batch_size,
-        dataset.num_frames,
-        dataset.num_episodes,
+        num_frames,
+        num_episodes,
         train_metrics,
         initial_step=step,
     )
 
     # Ensures proper data shuffling across epochs in distributed training
     epoch = 0
-    samples_per_epoch = len(dataset) // effective_batch_size
-    sampler.set_epoch(epoch)
+    if sampler is not None:
+        samples_per_epoch = num_frames // effective_batch_size
+        sampler.set_epoch(epoch)
+    else:
+        samples_per_epoch = 0
 
     for _ in range(step, config.system.train_steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
-        batch = {
-            k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
+        if isinstance(batch, dict):  # lerobot: move batched tensors to device
+            batch = {
+                k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+                for k, v in batch.items()
+            }
 
         if preprocessor is not None:
             batch = preprocessor(batch)
@@ -548,7 +578,7 @@ def main(config: TrainConfig, seed: int):
 
         # Update epoch counter for sampler.set_epoch() when we've processed one epoch worth of samples
         # This ensures proper data shuffling across epochs in distributed training
-        if samples_per_epoch > 0 and step % samples_per_epoch == 0:
+        if sampler is not None and samples_per_epoch > 0 and step % samples_per_epoch == 0:
             epoch += 1
             sampler.set_epoch(epoch)
 

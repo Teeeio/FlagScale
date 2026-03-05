@@ -76,16 +76,24 @@ class QwenGr00t(TrainablePolicy):
                 for k, v in raw_output.items()
             }
 
-    def forward(self, examples: dict, **kwargs):
+    def forward(self, batch: list[dict] | dict, **kwargs) -> dict[str, torch.Tensor]:
         """ """
-        actions = examples[ACTION]
-        state = examples[OBS_STATE] if self.use_state else None
+        if isinstance(batch, list):  # wds: list of per-sample dicts
+            images = [ex["image"] for ex in batch]
+            instructions = [ex["lang"] for ex in batch]
+            actions = torch.stack([ex["action"] for ex in batch])
+            if self.use_state and "state" in batch[0]:
+                state = torch.stack([ex["state"] for ex in batch])
+            else:
+                state = None
+        else:  # lerobot: single dict with batched tensors
+            images, instructions = self.vlm.prepare_input(
+                batch, image_feature_keys=list(self.image_features.keys())
+            )
+            actions = batch[ACTION]
+            state = batch.get(OBS_STATE) if self.use_state else None
 
-        # Step 1: QWenVL input format
-        # NOTE: (yupu) The order of the images differs from starVLA, which is [image, wrist_image]
-        qwen_inputs = self.vlm.prepare_input(
-            examples, image_feature_keys=list(self.image_features.keys())
-        )
+        qwen_inputs = self.vlm.build_qwenvl_inputs(images, instructions)
 
         # TODO: (yupu) Hard-coded autocast and dtype, matches starVLA
         with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -125,7 +133,7 @@ class QwenGr00t(TrainablePolicy):
         return {"loss": output["loss"]}
 
     @torch.inference_mode()
-    def predict_action(self, examples: list[dict], **kwargs) -> dict:
+    def predict_action(self, batch: list[dict] | dict, **kwargs) -> dict:
         """
         Steps:
           1. Resize images to training resolution (if specified)
@@ -135,10 +143,20 @@ class QwenGr00t(TrainablePolicy):
             dict:
                 normalized_actions (np.ndarray): Shape [B, T, action_dim], diffusion-sampled normalized actions.
         """
-        qwen_inputs = self.vlm.prepare_input(
-            examples, image_feature_keys=list(self.image_features.keys())
-        )
-        state = examples[OBS_STATE] if self.use_state else None
+        if isinstance(batch, list):  # wds: list of per-sample dicts
+            images = [ex["image"] for ex in batch]
+            instructions = [ex["lang"] for ex in batch]
+            if self.use_state and "state" in batch[0]:
+                state = torch.stack([ex["state"] for ex in batch])
+            else:
+                state = None
+        else:  # lerobot: single dict with batched tensors
+            images, instructions = self.vlm.prepare_input(
+                batch, image_feature_keys=list(self.image_features.keys())
+            )
+            state = batch.get(OBS_STATE) if self.use_state else None
+
+        qwen_inputs = self.vlm.build_qwenvl_inputs(images, instructions)
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
             vlm_output = self.vlm.forward(qwen_inputs, output_attentions=False)

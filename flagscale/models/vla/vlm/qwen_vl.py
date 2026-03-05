@@ -70,8 +70,55 @@ class QwenVLBackbone(nn.Module):
         """HF config object (e.g., Qwen2VLConfig)."""
         return self.model.config
 
-    def prepare_input(self, batch: dict, image_feature_keys: list[str]) -> dict[str, torch.Tensor]:
+    def prepare_input(
+        self, batch: dict, image_feature_keys: list[str]
+    ) -> tuple[list[list[Image.Image]], list[str]]:
+        # TODO: (yupu) hard-code task key to "task"
+        instructions = batch["task"]
+        if isinstance(instructions, torch.Tensor):
+            instructions = instructions.detach().cpu().tolist()
+        if isinstance(instructions, str):
+            instructions = [instructions]
+
+        batch_images: list[list[Image.Image]] | None = None
+        for key in image_feature_keys:
+            imgs = batch[key]
+            if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
+                imgs = [imgs]
+            key_images = [_to_pil(img) for img in imgs]
+            if batch_images is None:
+                batch_images = [[img] for img in key_images]
+            else:
+                for sample_images, img in zip(batch_images, key_images):
+                    sample_images.append(img)
+
+        for idx, sample_images in enumerate(batch_images):
+            batch_images[idx] = [img for img in sample_images if img is not None]
+
+        return batch_images, instructions
+
+    def build_qwenvl_inputs(
+        self, images: list[list[Image.Image]], instructions: list[str]
+    ) -> dict[str, torch.Tensor]:
         raise NotImplementedError
+
+    def _build_messages(
+        self, images: list[list[Image.Image]], instructions: list[str]
+    ) -> list[list[dict]]:
+        messages = []
+        assert len(images) == len(instructions)
+        for imgs, instruction in zip(images, instructions):
+            content = [{"type": "image", "image": img} for img in imgs]
+
+            if "CoT_prompt" in self._config.data.vla_data:
+                cot_prompt = self._config.data.vla_data.get("CoT_prompt", "")
+                prompt = cot_prompt.replace("{instruction}", instruction)
+            else:
+                prompt = instruction
+
+            content.append({"type": "text", "text": prompt})
+            messages.append([{"role": "user", "content": content}])
+        return messages
 
     def forward(self, batch: dict[str, torch.Tensor], **kwargs) -> dict[str, torch.Tensor]:
         with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -105,49 +152,12 @@ class Qwen25VLBackbone(QwenVLBackbone):
             torch_dtype="auto",
         )
 
-    def prepare_input(self, batch: dict, image_feature_keys: list[str]) -> dict[str, torch.Tensor]:
-        return self.build_qwenvl_inputs(examples=batch, image_feature_keys=image_feature_keys)
-
-    def build_qwenvl_inputs(self, examples, image_feature_keys):
-        # TODO: (yupu) hard-code task key to "task"
-        instructions = examples["task"]
-        if isinstance(instructions, torch.Tensor):
-            instructions = instructions.detach().cpu().tolist()
-        if isinstance(instructions, str):
-            instructions = [instructions]
-
-        batch_images = None
-        for key in image_feature_keys:
-            imgs = examples[key]
-            if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
-                imgs = [imgs]
-            key_images = [_to_pil(img) for img in imgs]
-            if batch_images is None:
-                batch_images = [[img] for img in key_images]
-            else:
-                for sample_images, img in zip(batch_images, key_images):
-                    sample_images.append(img)
-
-        for idx, sample_images in enumerate(batch_images):
-            batch_images[idx] = [img for img in sample_images if img is not None]
-
+    def build_qwenvl_inputs(
+        self, images: list[list[Image.Image]], instructions: list[str]
+    ) -> dict[str, torch.Tensor]:
         from qwen_vl_utils import process_vision_info
 
-        # Create messages: one message per sample
-        messages = []
-        assert len(batch_images) == len(instructions)
-        for imgs, instruction in zip(batch_images, instructions):
-            content = [{"type": "image", "image": img} for img in imgs]
-
-            if "CoT_prompt" in self._config.data.vla_data:
-                CoT_prompt = self._config.data.vla_data.get("CoT_prompt", "")
-                prompt = CoT_prompt.replace("{instruction}", instruction)
-            else:
-                prompt = instruction
-
-            content.append({"type": "text", "text": prompt})
-            msg = [{"role": "user", "content": content}]
-            messages.append(msg)
+        messages = self._build_messages(images, instructions)
 
         # Prepare text prompts using processor
         # default process is json --> message --> texts --> input_ids
@@ -188,47 +198,10 @@ class Qwen3VLBackbone(QwenVLBackbone):
 
         return model
 
-    def prepare_input(self, batch: dict, image_feature_keys: list[str]) -> dict[str, torch.Tensor]:
-        return self.build_qwenvl_inputs(examples=batch, image_feature_keys=image_feature_keys)
-
-    def build_qwenvl_inputs(self, examples, image_feature_keys):
-        # TODO: (yupu) hard-code task key to "task"
-        instructions = examples["task"]
-        if isinstance(instructions, torch.Tensor):
-            instructions = instructions.detach().cpu().tolist()
-        if isinstance(instructions, str):
-            instructions = [instructions]
-
-        batch_images = None
-        for key in image_feature_keys:
-            imgs = examples[key]
-            if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
-                imgs = [imgs]
-            key_images = [_to_pil(img) for img in imgs]
-            if batch_images is None:
-                batch_images = [[img] for img in key_images]
-            else:
-                for sample_images, img in zip(batch_images, key_images):
-                    sample_images.append(img)
-
-        for idx, sample_images in enumerate(batch_images):
-            batch_images[idx] = [img for img in sample_images if img is not None]
-
-        # Create messages: one message per sample
-        messages = []
-        assert len(batch_images) == len(instructions)
-        for imgs, instruction in zip(batch_images, instructions):
-            content = [{"type": "image", "image": img} for img in imgs]
-
-            if "CoT_prompt" in self._config.data.vla_data:
-                CoT_prompt = self._config.data.vla_data.get("CoT_prompt", "")
-                prompt = CoT_prompt.replace("{instruction}", instruction)
-            else:
-                prompt = instruction
-
-            content.append({"type": "text", "text": prompt})
-            msg = [{"role": "user", "content": content}]
-            messages.append(msg)
+    def build_qwenvl_inputs(
+        self, images: list[list[Image.Image]], instructions: list[str]
+    ) -> dict[str, torch.Tensor]:
+        messages = self._build_messages(images, instructions)
 
         # Preparation for inference
         batch_inputs = self.processor.apply_chat_template(
