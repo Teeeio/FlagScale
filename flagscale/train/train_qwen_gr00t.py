@@ -431,9 +431,9 @@ def main(config: TrainConfig, seed: int):
             config.data.data_path,
             batch_size=config.system.batch_size,
             task_encoder=TaskEncoder(config.data.wds),
-            worker_config=WorkerConfig.default_worker_config(
-                num_workers=config.system.num_workers,
-            ),
+            shuffle_buffer_size=1000,
+            max_samples_per_sequence=100,
+            worker_config=WorkerConfig.default_worker_config(num_workers=1, data_parallel_group=None),
             repeat=True,
         )
         dataloader = get_loader(ds)
@@ -441,8 +441,9 @@ def main(config: TrainConfig, seed: int):
         preprocessor = None
         postprocessor = None
         sampler = None
-        num_frames = 0
-        num_episodes = 0
+        # Only to make the `MetricsTracker` work for now
+        num_frames = 1
+        num_episodes = 1
     else:
         dataset = make_dataset(config.data)
         dist.barrier()
