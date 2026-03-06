@@ -13,15 +13,18 @@ A lightweight implementation that Qwen-VL + Flow-matching head to directly predi
 Flow-matching header is copyright from GR00T N1.5,
 """
 
-import torch
-from transformers import PretrainedConfig, PreTrainedModel
+from pathlib import Path
 
-from flagscale.models.utils.constants import ACTION
+import torch
+
+from flagscale.models.configs.types import FeatureType, PolicyFeature
+from flagscale.models.utils.constants import ACTION, OBS_STATE, VLM_CONFIG_DIR
+from flagscale.models.vla.base_policy import TrainablePolicy
 from flagscale.models.vla.registry import build_action_model, build_vlm
 from flagscale.train.train_config import TrainConfig
 
 
-class QwenGr00t(PreTrainedModel):
+class QwenGr00t(TrainablePolicy):
     """
     Multimodal vision-language-action model.
 
@@ -32,10 +35,8 @@ class QwenGr00t(PreTrainedModel):
     Focus: Predict future continuous actions conditioned on images + instruction.
     """
 
-    config_class = PretrainedConfig
-
     def __init__(self, config: TrainConfig, **kwargs):
-        super().__init__(PretrainedConfig())
+        super().__init__()
         self._config = config
 
         vlm_type = config.model.vlm.get("type", "qwen3-vl")
@@ -50,33 +51,49 @@ class QwenGr00t(PreTrainedModel):
         )
 
         self.future_action_window_size = config.model.action_model.future_action_window_size
+        self.use_state = config.model.action_model.get("use_state", False)
 
-        # DEBUG: Track random state after action model creation
-        print(
-            f"[DEBUG RNG] After action_model: torch state[:10] = {torch.get_rng_state()[:10].tolist()}"
-        )
+        # Deserialize input/output features from config (checkpoint load path).
+        # At training time, make_policy sets these on the policy after construction.
+        load_pretrained = config.model.qwenvl.get("load_pretrained", True)
+        raw_input = config.model.get("input_features", {})
+        raw_output = config.model.get("output_features", {})
 
-        # DEBUG: Print action encoder weights to verify initialization matches starVLA
-        if hasattr(self.action_model, "_head") and hasattr(
-            self.action_model._head, "action_encoder"
-        ):
-            ae = self.action_model._head.action_encoder
-            print(
-                f"[DEBUG INIT] action_encoder.layer1.weight[:3,:5]: {ae.layer1.weight[:3, :5].tolist()}"
-            )
-            print(
-                f"[DEBUG INIT] action_encoder.layer1.weight sum: {ae.layer1.weight.sum().item():.6f}"
+        if not load_pretrained and (not raw_input or not raw_output):
+            raise ValueError(
+                "Checkpoint config missing input_features/output_features. "
+                "Re-save the checkpoint with the latest training code."
             )
 
-    def forward(self, examples: dict, **kwargs):
+        if raw_input:
+            self.input_features = {
+                k: PolicyFeature(type=FeatureType(v["type"]), shape=tuple(v["shape"]))
+                for k, v in raw_input.items()
+            }
+        if raw_output:
+            self.output_features = {
+                k: PolicyFeature(type=FeatureType(v["type"]), shape=tuple(v["shape"]))
+                for k, v in raw_output.items()
+            }
+
+    def forward(self, batch: list[dict] | dict, **kwargs) -> dict[str, torch.Tensor]:
         """ """
-        # actions = [example["action"] for example in examples]  # [B, T, action_dim]
-        actions = examples[ACTION]
-        state = None  # examples[OBS_STATE]
+        if isinstance(batch, list):  # wds: list of per-sample dicts
+            images = [ex["image"] for ex in batch]
+            instructions = [ex["lang"] for ex in batch]
+            actions = [ex["action"] for ex in batch]
+            if self.use_state and "state" in batch[0]:
+                state = [ex["state"] for ex in batch]
+            else:
+                state = None
+        else:  # lerobot: single dict with batched tensors
+            images, instructions = self.vlm.prepare_input(
+                batch, image_feature_keys=list(self.image_features.keys())
+            )
+            actions = [batch[ACTION][i] for i in range(batch[ACTION].shape[0])]
+            state = batch.get(OBS_STATE) if self.use_state else None
 
-        # Step 1: QWenVL input format
-        # NOTE: (yupu) The order of the images differs from starVLA, which is [image, wrist_image]
-        qwen_inputs = self.vlm.prepare_input(examples)
+        qwen_inputs = self.vlm.build_qwenvl_inputs(images, instructions)
 
         # TODO: (yupu) Hard-coded autocast and dtype, matches starVLA
         with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -84,18 +101,38 @@ class QwenGr00t(PreTrainedModel):
             # last_hidden_state: [B, seq_len, H]
             last_hidden = vlm_output["hidden_states"][-1]  # [B, L, H]
 
-        # Step 4: Action Expert Forward and Loss
+        target_horizon = self._config.model.action_model.action_horizon
+        target_dim = self._config.model.action_model.action_dim
+
+        padded_actions = []
+        action_masks = []
+        for a in actions:
+            a = a.float()
+            T_orig = a.shape[0]
+
+            # 1. Align action dimension (padding or truncating)
+            if a.shape[-1] != target_dim:
+                aligned = torch.zeros(T_orig, target_dim, dtype=a.dtype)
+                copy_dim = min(a.shape[-1], target_dim)
+                aligned[:, :copy_dim] = a[:, :copy_dim]
+                a = aligned
+
+            # 2. Time dimension padding
+            final_a = torch.zeros(target_horizon, target_dim, dtype=a.dtype)
+            mask = torch.zeros(target_horizon, dtype=torch.bool)
+            copy_T = min(T_orig, target_horizon)
+            final_a[:copy_T] = a[:copy_T]
+            mask[:copy_T] = True
+
+            padded_actions.append(final_a)
+            action_masks.append(mask)
+
         with torch.autocast("cuda", dtype=torch.float32):
             # TODO: (yupu) Is this a bug or a feature? The action dtype would stay as bf16 under this autocast.
-            actions = actions.to(device=last_hidden.device, dtype=last_hidden.dtype)
-            # actions = torch.tensor(
-            #     np.array(actions), device=last_hidden.device, dtype=last_hidden.dtype
-            # )  # [B, T_full, action_dim]
-
-            # TODO: does not match RoboBrainX, need to check
-            actions_target = actions[
-                :, -(self.future_action_window_size + 1) :, :
-            ]  # (B, chunk_len, action_dim)
+            actions = torch.stack(padded_actions).to(
+                device=last_hidden.device, dtype=last_hidden.dtype
+            )
+            action_masks = torch.stack(action_masks).to(device=last_hidden.device)
 
             # TODO: (yupu) I believe there is a bug in starVLA, the
             # `repeated_diffusion_steps` is not properly set in the config.
@@ -103,32 +140,30 @@ class QwenGr00t(PreTrainedModel):
                 "repeated_diffusion_steps", 4
             )
 
-            actions_repeated = actions_target.repeat(repeated_diffusion_steps, 1, 1)
+            actions_repeated = actions.repeat(repeated_diffusion_steps, 1, 1)
             last_hidden_repeated = last_hidden.repeat(repeated_diffusion_steps, 1, 1)
+            action_masks_repeated = action_masks.repeat(repeated_diffusion_steps, 1)
 
             state_repeated = None
             if state is not None:
+                if isinstance(state, list):
+                    state = torch.stack(state)
                 state = state.to(device=last_hidden.device, dtype=last_hidden.dtype)
                 state_repeated = state.repeat(repeated_diffusion_steps, 1, 1)
 
-            # Use action head forward API
             vlm_output_repeated = {"hidden_states": last_hidden_repeated}
-            action_input = {"actions": actions_repeated, "state": state_repeated}
-
-            # torch.save(vlm_output_repeated, "vlm_output_repeated.pt")
-            # torch.save(action_input, "action_input.pt")
+            action_input = {
+                "actions": actions_repeated,
+                "state": state_repeated,
+                "mask": action_masks_repeated,
+            }
 
             output = self.action_model.forward(vlm_output_repeated, action_input)
 
-            # torch.save(output, "output.pt")
-
-        # print(f"output: {output}")
-        # assert False
-
-        return output["loss"]
+        return {"loss": output["loss"]}
 
     @torch.inference_mode()
-    def predict_action(self, examples: list[dict], **kwargs) -> dict:
+    def predict_action(self, batch: list[dict] | dict, **kwargs) -> dict:
         """
         Steps:
           1. Resize images to training resolution (if specified)
@@ -138,27 +173,20 @@ class QwenGr00t(PreTrainedModel):
             dict:
                 normalized_actions (np.ndarray): Shape [B, T, action_dim], diffusion-sampled normalized actions.
         """
-        # TODO: (yupu) Fix inference input format to use constants (OBS_IMAGE, OBS_LANGUAGE, OBS_STATE)
-        # instead of hardcoded keys. The current keys are inconsistent with training batch format.
-        # batch_images = [[to_pil_preserve(example["image"])] for example in examples]  # [B, [PLT]]
-        # instructions = [example["lang"] for example in examples]  # [B, str]
+        if isinstance(batch, list):  # wds: list of per-sample dicts
+            images = [ex["image"] for ex in batch]
+            instructions = [ex["lang"] for ex in batch]
+            if self.use_state and "state" in batch[0]:
+                state = torch.stack([ex["state"] for ex in batch])
+            else:
+                state = None
+        else:  # lerobot: single dict with batched tensors
+            images, instructions = self.vlm.prepare_input(
+                batch, image_feature_keys=list(self.image_features.keys())
+            )
+            state = batch.get(OBS_STATE) if self.use_state else None
 
-        # We assume the images are already resized during preprocessing.
-        qwen_inputs = self.vlm.prepare_input(examples)
-        state = None  # examples[OBS_STATE]
-
-        # state = (
-        #     [example["state"] for example in examples] if "state" in examples[0] else None
-        # )  # [B, 1, state_dim]
-
-        # train_obs_image_size = getattr(self._config.data.vla_data, "image_size", None)
-        # if train_obs_image_size:
-        #     batch_images = resize_images(batch_images, target_size=train_obs_image_size)
-
-        # # Step 1: QWenVL input format
-        # qwen_inputs = self.vlm.build_qwenvl_inputs(
-        #     examples=None, images=batch_images, instructions=instructions
-        # )
+        qwen_inputs = self.vlm.build_qwenvl_inputs(images, instructions)
 
         with torch.autocast("cuda", dtype=torch.bfloat16):
             vlm_output = self.vlm.forward(qwen_inputs, output_attentions=False)
@@ -168,17 +196,35 @@ class QwenGr00t(PreTrainedModel):
         if state is not None:
             state = state.to(device=last_hidden.device, dtype=last_hidden.dtype)
 
-        # state_tensor = (
-        #     torch.from_numpy(np.array(state)).to(last_hidden.device, dtype=last_hidden.dtype)
-        #     if state is not None
-        #     else None
-        # )
-
         # Step 4: Action Expert Forward
         with torch.autocast("cuda", dtype=torch.float32):
             vlm_output_for_action = {"hidden_states": last_hidden}
             action_input = {"state": state}
             output = self.action_model.predict_action(vlm_output_for_action, action_input)
 
-        # Assume the output of the action moadel is dict mapps `ACTION` to the normalized actions
+        # Assume the output of the action model is dict mapping `ACTION` to the normalized actions
         return output
+
+    def checkpoint_config_overrides(self) -> dict:
+        return {
+            "model": {
+                "qwenvl": {
+                    "load_pretrained": False,
+                    "base_vlm": "${_pretrained_dir}/" + VLM_CONFIG_DIR,
+                },
+                "input_features": {
+                    k: {"type": ft.type.value, "shape": list(ft.shape)}
+                    for k, ft in self.input_features.items()
+                },
+                "output_features": {
+                    k: {"type": ft.type.value, "shape": list(ft.shape)}
+                    for k, ft in self.output_features.items()
+                },
+            }
+        }
+
+    def save_pretrained_artifacts(self, save_dir: Path) -> None:
+        vlm_config_dir = save_dir / VLM_CONFIG_DIR
+        vlm_config_dir.mkdir(parents=True, exist_ok=True)
+        self.vlm.model.config.save_pretrained(vlm_config_dir)
+        self.vlm.processor.save_pretrained(vlm_config_dir)

@@ -1,3 +1,6 @@
+# Mainly adopted from:
+# https://github.com/starVLA/starVLA/blob/3f7feefbc5fc25890ad3a7d262b8a0aea1339aa7/deployment/model_server/tools/websocket_policy_server.py
+
 import asyncio
 import http
 import time
@@ -13,8 +16,8 @@ from flagscale.logger import logger
 
 
 @runtime_checkable
-class Policy(Protocol):
-    def infer(self, obs: dict) -> dict: ...
+class ServablePolicy(Protocol):
+    def inference(self, obs: dict) -> dict: ...
 
 
 class WebsocketPolicyServer:
@@ -28,7 +31,7 @@ class WebsocketPolicyServer:
 
     def __init__(
         self,
-        policy: Policy,
+        policy: ServablePolicy,
         host: str = "0.0.0.0",
         port: int = 10093,
         metadata: dict | None = None,
@@ -65,7 +68,7 @@ class WebsocketPolicyServer:
                 obs: dict = msgpack_numpy.unpackb(await websocket.recv())
 
                 infer_time = time.monotonic()
-                action: dict = self._policy.infer(obs)
+                action: dict = self._policy.inference(obs)
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {"infer_ms": infer_time * 1000}

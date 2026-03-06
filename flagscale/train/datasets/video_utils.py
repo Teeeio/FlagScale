@@ -65,8 +65,6 @@ def decode_video_frames(
         backend = get_safe_default_codec()
     if backend == "torchcodec":
         return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s)
-    elif backend == "torchvision_av":
-        return decode_video_frames_torchvision_av(video_path, timestamps, tolerance_s)
     elif backend in ["pyav", "video_reader"]:
         return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend)
     else:
@@ -171,53 +169,6 @@ def decode_video_frames_torchvision(
     return closest_frames
 
 
-def decode_video_frames_torchvision_av(
-    video_path: Path | str,
-    timestamps: list[float],
-    tolerance_s: float,
-) -> torch.Tensor:
-    """Match starVLA torchvision_av behavior: seek per timestamp and pick closest frame."""
-    video_path = str(video_path)
-    torchvision.set_video_backend("pyav")
-
-    loaded_frames = []
-    loaded_ts = []
-    reader = None
-    try:
-        reader = torchvision.io.VideoReader(video_path, "video")
-        for target_ts in timestamps:
-            reader.seek(target_ts, keyframes_only=True)
-            closest_frame = None
-            closest_diff = float("inf")
-            for frame in reader:
-                current_ts = frame["pts"]
-                current_diff = abs(current_ts - target_ts)
-                if current_diff < closest_diff:
-                    closest_diff = current_diff
-                    closest_frame = frame
-                else:
-                    break
-            if closest_frame is None:
-                raise ValueError(f"No frame found for timestamp {target_ts}")
-            frame_data = closest_frame["data"]
-            loaded_frames.append(frame_data)
-            loaded_ts.append(closest_frame["pts"])
-    finally:
-        if reader is not None and hasattr(reader, "container"):
-            reader.container.close()
-
-    frames = torch.stack(
-        [f if isinstance(f, torch.Tensor) else torch.as_tensor(f) for f in loaded_frames]
-    )
-    if tolerance_s is not None:
-        diff = (torch.tensor(loaded_ts) - torch.tensor(timestamps)).abs()
-        assert (diff < tolerance_s).all(), (
-            f"Loaded timestamps exceed tolerance: {diff.max()} > {tolerance_s}"
-        )
-    frames = frames.type(torch.float32) / 255
-    return frames
-
-
 class VideoDecoderCache:
     """Thread-safe cache for video decoders to avoid expensive re-initialization."""
 
@@ -236,6 +187,7 @@ class VideoDecoderCache:
 
         with self._lock:
             if video_path not in self._cache:
+                # Pass path directly instead of fsspec file handle — only local files are supported.
                 decoder = VideoDecoder(video_path, seek_mode="approximate")
                 self._cache[video_path] = (decoder, None)
 

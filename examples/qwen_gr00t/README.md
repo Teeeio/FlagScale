@@ -1,6 +1,6 @@
-# PI0: Training, Inference, and Serving
+# Qwen-GR00T: Training, Inference, and Serving
 
-This guide covers how to train, run inference, and serve PI0 models using FlagScale.
+This guide covers how to train, run inference, and serve Qwen-GR00T models using FlagScale. Qwen-GR00T uses a Qwen3-VL backbone as the vision-language model with a DiT-based flow matching action head.
 
 ## Installation
 
@@ -38,21 +38,16 @@ pip install huggingface_hub
 pip install modelscope
 ```
 
-## Download Models and Tokenizers
+## Download Models
 
-Download models and tokenizers using the provided script. Choose either HuggingFace Hub or ModelScope based on your preference:
+Download the base VLM model. Qwen-GR00T supports Qwen3-VL and Qwen2.5-VL as the VLM backbone:
 
 **Using HuggingFace Hub:**
 
 ```sh
 cd FlagScale/
 python examples/pi0/download.py \
-    --repo_id lerobot/pi0_base \
-    --output_dir /workspace/models \
-    --source huggingface
-
-python examples/pi0/download.py \
-    --repo_id google/paligemma-3b-pt-224 \
+    --repo_id Qwen/Qwen3-VL-4B-Instruct \
     --output_dir /workspace/models \
     --source huggingface
 ```
@@ -62,19 +57,13 @@ python examples/pi0/download.py \
 ```sh
 cd FlagScale/
 python examples/pi0/download.py \
-    --repo_id lerobot/pi0_base \
-    --output_dir /workspace/models \
-    --source modelscope
-
-python examples/pi0/download.py \
-    --repo_id google/paligemma-3b-pt-224 \
+    --repo_id Qwen/Qwen3-VL-4B-Instruct \
     --output_dir /workspace/models \
     --source modelscope
 ```
 
-The models will be downloaded to (example with `/workspace/models`):
-- `/workspace/models/lerobot/pi0_base`
-- `/workspace/models/google/paligemma-3b-pt-224`
+The model will be downloaded to (example with `/workspace/models`):
+- `/workspace/models/Qwen/Qwen3-VL-4B-Instruct`
 
 
 ## Training
@@ -83,14 +72,14 @@ The models will be downloaded to (example with `/workspace/models`):
 
 FlagScale uses the **LeRobotDataset v3.0** format. For detailed information about the format structure, see the [LeRobotDataset v3.0 documentation](https://huggingface.co/docs/lerobot/en/lerobot-dataset-v3).
 
-For example, to download the `aloha_mobile_cabinet` dataset:
+For example, to download the `libero_goal` dataset:
 
 **Using HuggingFace Hub:**
 
 ```sh
 cd FlagScale/
 python examples/pi0/download.py \
-    --repo_id lerobot/aloha_mobile_cabinet \
+    --repo_id IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot \
     --output_dir /workspace/datasets \
     --repo_type dataset \
     --source huggingface
@@ -101,21 +90,21 @@ python examples/pi0/download.py \
 ```sh
 cd FlagScale/
 python examples/pi0/download.py \
-    --repo_id lerobot/aloha_mobile_cabinet \
+    --repo_id IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot \
     --output_dir /workspace/datasets \
     --repo_type dataset \
     --source modelscope
 ```
 
 The dataset will be downloaded to (example with `/workspace/datasets`):
-- `/workspace/datasets/lerobot/aloha_mobile_cabinet`
+- `/workspace/datasets/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot`
 
 ### Edit Config
 
 FlagScale uses a two-level configuration system:
 
-1. **Experiment-level config** (`examples/pi0/conf/train.yaml`): Defines experiment settings, environment variables, and resource allocation
-2. **Task-level config** (`examples/pi0/conf/train/pi0.yaml`): Defines model, dataset, and training hyperparameters
+1. **Experiment-level config** (`examples/qwen_gr00t/conf/train.yaml`): Defines experiment settings, environment variables, and resource allocation
+2. **Task-level config** (`examples/qwen_gr00t/conf/train/qwen_gr00t.yaml`): Defines model, dataset, and training hyperparameters
 
 #### Experiment-Level Config
 
@@ -123,12 +112,12 @@ Edit the experiment-level config for multi-GPU training:
 
 ```sh
 cd FlagScale/
-vim examples/pi0/conf/train.yaml
+vim examples/qwen_gr00t/conf/train.yaml
 ```
 
 Configure the following fields:
 
-- `experiment.envs.CUDA_VISIBLE_DEVICES` - GPU devices to use (e.g., `"0,1,2,3"` for 4 GPUs, `"0,1"` for 2 GPUs)
+- `experiment.envs.CUDA_VISIBLE_DEVICES` - GPU devices to use (default: `"0,1,2,3,4,5,6,7"` for 8 GPUs)
 - `experiment.envs.CUDA_DEVICE_MAX_CONNECTIONS` - Connection limit (typically `1`)
 - `experiment.exp_name` - Experiment name
 - `experiment.exp_dir` - Output directory for checkpoints and logs
@@ -139,59 +128,95 @@ Edit the task-level config for model and training settings:
 
 ```sh
 cd FlagScale/
-vim examples/pi0/conf/train/pi0.yaml
+vim examples/qwen_gr00t/conf/train/qwen_gr00t.yaml
 ```
 
 Configure the following fields:
 
 **System settings** (training hyperparameters):
-- `system.batch_size` - Batch size per GPU
-- `system.train_steps` - Total training steps
-- `system.optimizer.name` - Optimizer name (default: `"AdamW"`)
-- `system.optimizer.lr` - Learning rate (default: `2.5e-5`)
-- `system.optimizer.betas` - Optimizer betas (default: `[0.9, 0.95]`)
-- `system.optimizer.eps` - Optimizer epsilon (default: `1.0e-8`)
-- `system.optimizer.weight_decay` - Weight decay (default: `0.01`)
-- `system.scheduler.warmup_steps` - Warmup steps (default: `1000`)
-- `system.scheduler.decay_steps` - Decay steps (default: `30000`)
-- `system.scheduler.decay_lr` - Final learning rate after decay (default: `2.5e-6`)
+- `system.batch_size` - Batch size per GPU (default: `16`)
+- `system.train_steps` - Total training steps (default: `30000`)
+- `system.grad_clip_norm` - Gradient clipping norm (default: `1.0`)
+- `system.use_amp` - Whether to use automatic mixed precision (default: `true`)
+- `system.shuffle` - Whether to shuffle training data (default: `true`)
+- `system.num_workers` - Number of data loading workers (default: `4`)
 - `system.checkpoint.save_checkpoint` - Whether to save checkpoints (default: `true`)
 - `system.checkpoint.save_freq` - Steps between checkpoints (default: `1000`)
-- `system.checkpoint.output_directory` - Checkpoint output directory (default: `${experiment.exp_dir}/ckpt`)
+- `system.checkpoint.output_directory` - Checkpoint output directory (default: `${experiment.exp_dir}`)
 
 **Model settings**:
-- `model.model_name` - Model name: `"pi0"` or `"pi0.5"`
-- `model.checkpoint_dir` - Path to pretrained model (e.g., `/workspace/models/lerobot/pi0_base`)
-- `model.tokenizer_path` - Path to tokenizer (e.g., `/workspace/models/google/paligemma-3b-pt-224`)
-- `model.tokenizer_max_length` - Maximum tokenizer sequence length
-- `model.action_steps` - Number of action steps to predict
+- `model.model_name` - Model name: `"qwen_gr00t"`
+- `model.checkpoint_dir` - Path to the pretrained base VLM model (e.g., `/workspace/models/Qwen/Qwen3-VL-4B-Instruct`)
+- `model.vlm.type` - VLM backbone type: `"qwen3-vl"` or `"qwen2.5-vl"`
+- `model.qwenvl.base_vlm` - Path to the base VLM (same as `model.checkpoint_dir`)
+- `model.qwenvl.attn_implementation` - Attention implementation (default: `"flash_attention_2"`)
+- `model.qwenvl.vl_hidden_dim` - VLM hidden dimension (default: `2048`)
+- `model.dino.dino_backbone` - DINOv2 backbone variant (default: `"dinov2_vits14"`)
+- `model.action_model.use_state` - Whether to condition the action model on proprioceptive state (default: `false`)
+- `model.action_model.type` - Action model type (default: `"flow_matching"`)
+- `model.action_model.action_model_type` - DiT variant (default: `"DiT-B"`)
+- `model.action_model.action_dim` - Action dimension (default: `7`)
+- `model.action_model.state_dim` - State dimension (default: `7`)
+- `model.action_model.future_action_window_size` - Future action window (default: `7`)
+- `model.action_model.action_horizon` - Action horizon (default: `8`)
+- `model.action_model.num_inference_timesteps` - Inference diffusion steps (default: `4`)
+- `model.reduce_in_full_precision` - Whether to reduce gradients in FP32 (default: `true`)
+
+**Optimizer settings**:
+- `model.optimizer.name` - Optimizer name (default: `"AdamW"`)
+- `model.optimizer.lr` - Base learning rate (default: `2.5e-5`)
+- `model.optimizer.betas` - Optimizer betas (default: `[0.9, 0.95]`)
+- `model.optimizer.eps` - Optimizer epsilon (default: `1.0e-8`)
+- `model.optimizer.weight_decay` - Weight decay (default: `1.0e-8`)
+- `model.optimizer.param_groups` - Per-module learning rates:
+  ```yaml
+  param_groups:
+    vlm:
+      lr: 1.0e-05
+    action_model:
+      lr: 1.0e-04
+  ```
+- `model.optimizer.scheduler.name` - Scheduler name (default: `"cosine_with_min_lr"`)
+- `model.optimizer.scheduler.warmup_steps` - Warmup steps (default: `5000`)
+- `model.optimizer.scheduler.scheduler_kwargs.min_lr` - Minimum learning rate (default: `1.0e-6`)
+
+**Module freezing** (optional):
+```yaml
+model:
+  freeze:
+    # Freeze VLM, train only action head
+    freeze_patterns:
+      - "qwen_vl_interface\\..*"
+    # Optionally keep specific modules trainable
+    keep_patterns:
+      - "qwen_vl_interface\\.model\\.visual\\.merger\\..*"
+```
 
 **Data settings**:
-- `data.data_path` - Path to LeRobot dataset root (e.g., `/workspace/datasets/lerobot/aloha_mobile_cabinet`)
-- `data.use_imagenet_stats` - Whether to use ImageNet normalization stats (default: `true`)
-- `data.rename_map` - Dictionary mapping dataset keys to policy keys (optional). Check the `features` key in your dataset's `meta/info.json` file to determine the correct mapping:
-  ```yaml
-  rename_map:
-    observation.images.cam_high: observation.images.base_0_rgb
-    observation.images.cam_left_wrist: observation.images.left_wrist_0_rgb
-    observation.images.cam_right_wrist: observation.images.right_wrist_0_rgb
-  ```
-- `data.use_quantiles` - Whether to use quantile normalization (for `pi0.5`, set to `false` to use MEAN_STD normalization)
+- `data.data_path` - Path to LeRobot dataset root (e.g., `/workspace/datasets/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot`)
+- `data.vla_data.data_mix` - Dataset mix name (e.g., `"libero_goal_old"`)
+- `data.vla_data.action_type` - Action type (e.g., `"delta_qpos"`)
+- `data.vla_data.default_image_resolution` - Image resolution `[C, H, W]` (default: `[3, 224, 224]`)
+- `data.vla_data.obs` - Observation image keys (default: `["image_0"]`)
+- `data.observation_delta_indices` - Observation delta indices (default: `[0]`)
+- `data.action_delta_indices` - Action delta indices (default: `[0,1,2,3,4,5,6,7]`)
+- `data.preprocessor` - Preprocessor pipeline configuration
+- `data.postprocessor` - Postprocessor pipeline configuration
 
 ### Start Training
 ```sh
 cd FlagScale/
-python run.py --config-path ./examples/pi0/conf --config-name train action=run
+flagscale train qwen_gr00t -c ./examples/qwen_gr00t/conf/train.yaml
 ```
 
-Training logs are saved to `outputs/pi0_train/logs/host_0_localhost.output` by default.
+Training logs are saved to `outputs/<exp_name>/logs/host_0_localhost.output` by default.
 
-Checkpoints are saved to `${experiment.exp_dir}/ckpt` (default: `outputs/pi0_train/ckpt`).
+Checkpoints are saved to `${experiment.exp_dir}/checkpoints`.
 
 ### Stop Training
 ```sh
 cd FlagScale/
-python run.py --config-path ./examples/pi0/conf --config-name train action=stop
+flagscale train qwen_gr00t --stop
 ```
 
 ## Inference
@@ -203,8 +228,8 @@ You can extract inference inputs (images, state, task) from a dataset using the 
 ```sh
 cd FlagScale/
 python examples/pi0/dump_dataset_inputs.py \
-    --dataset_root /workspace/datasets/lerobot/aloha_mobile_cabinet \
-    --output_dir ./inference_inputs \
+    --dataset_root /workspace/datasets/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot \
+    --output_dir ./qwen_gr00t_inference_inputs \
     --frame_index 100
 ```
 
@@ -214,69 +239,38 @@ This will create:
 - `frame_100_task.txt` - Task prompt
 - `extraction_summary.json` - Summary of extracted files
 
-Alternatively, you can extract from a specific episode and frame:
-
-```sh
-python examples/pi0/dump_dataset_inputs.py \
-    --dataset_root /workspace/datasets/lerobot/aloha_mobile_cabinet \
-    --output_dir ./inference_inputs \
-    --episode_index 0 \
-    --frame_in_episode 50
-```
-
-Or extract multiple samples at once:
-
-```sh
-python examples/pi0/dump_dataset_inputs.py \
-    --dataset_root /workspace/datasets/lerobot/aloha_mobile_cabinet \
-    --output_dir ./inference_inputs \
-    --frame_indices 100 200 300
-```
-
 ### Edit Config
 
 ```sh
 cd FlagScale/
-vim examples/pi0/conf/inference/pi0.yaml
+vim examples/qwen_gr00t/conf/inference/qwen_gr00t.yaml
 ```
 
 Configure the following fields:
 
 **Engine settings:**
-- `engine.model` - Path to pretrained model (e.g., `/workspace/models/lerobot/pi0_base`)
-- `engine.tokenizer` - Path to tokenizer (e.g., `/workspace/models/google/paligemma-3b-pt-224`)
-- `engine.stat_path` - Path to dataset statistics (e.g., `/workspace/datasets/lerobot/aloha_mobile_cabinet/meta/stats.json`)
+- `engine.model_variant` - Model variant (default: `"QwenGr00t"`)
+- `engine.model` - Path to trained checkpoint (e.g., `/workspace/outputs/qwen_gr00t_train/checkpoints/last`)
 - `engine.device` - Device to use (e.g., `"cuda"`)
 
 **Generate settings:**
 - `generate.images` - Dictionary mapping image keys to file paths:
   ```yaml
   images:
-    observation.images.cam_high: /path/to/image1.jpg
-    observation.images.cam_left_wrist: /path/to/image2.jpg
-    observation.images.cam_right_wrist: /path/to/image3.jpg
+    observation.images.wrist_image: /path/to/wrist_image.jpg
+    observation.images.image: /path/to/image.jpg
   ```
 - `generate.state_path` - Path to state tensor file (`.pt` file)
 - `generate.task_path` - Path to task prompt file (`.txt` file)
-- `generate.rename_map` (optional) - Map input keys to policy expected keys:
-  ```yaml
-  rename_map:
-    observation.images.cam_high: observation.images.base_0_rgb
-    observation.images.cam_left_wrist: observation.images.left_wrist_0_rgb
-    observation.images.cam_right_wrist: observation.images.right_wrist_0_rgb
-  ```
 
 ### Run Inference
 
 ```sh
 cd FlagScale/
-python run.py \
-    --config-path ./examples/pi0/conf \
-    --config-name inference \
-    action=run
+flagscale inference qwen_gr00t -c ./examples/qwen_gr00t/conf/inference.yaml
 ```
 
-Inference logs are saved to `outputs/pi0_inference/inference_logs/host_0_localhost.output` by default.
+Inference logs are saved to `outputs/qwen_gr00t_inference/inference_logs/host_0_localhost.output` by default.
 
 The predicted action tensor is printed to the console and saved in the log file.
 
@@ -286,7 +280,7 @@ The predicted action tensor is printed to the console and saved in the log file.
 
 ```sh
 cd FlagScale/
-vim examples/pi0/conf/serve/pi0.yaml
+vim examples/qwen_gr00t/conf/serve/qwen_gr00t.yaml
 ```
 
 Configure the following fields:
@@ -294,50 +288,22 @@ Configure the following fields:
 **Engine arguments:**
 - `engine_args.host` - Server host (default: `"0.0.0.0"`)
 - `engine_args.port` - Server port (default: `5000`)
-- `engine_args.model` - Path to pretrained model (e.g., `/workspace/models/lerobot/pi0_base`)
-- `engine_args.tokenizer` - Path to tokenizer (e.g., `/workspace/models/google/paligemma-3b-pt-224`)
-- `engine_args.stat_path` - Path to dataset statistics (e.g., `/workspace/datasets/lerobot/aloha_mobile_cabinet/meta/stats.json`)
+- `engine_args.model_variant` - Model variant (default: `"QwenGr00t"`)
+- `engine_args.model` - Path to trained checkpoint (e.g., `/workspace/outputs/qwen_gr00t_train/checkpoints/last`)
 - `engine_args.device` - Device to use (e.g., `"cuda"`)
-- `engine_args.images_keys` - List of image keys expected by the model (do not change):
-  ```yaml
-  images_keys:
-    - observation.images.base_0_rgb
-    - observation.images.left_wrist_0_rgb
-    - observation.images.right_wrist_0_rgb
-  ```
-- `engine_args.images_shape` - Image shape `[C, H, W]` for warmup (e.g., `[3, 480, 640]`)
-- `engine_args.state_key` - Key for state in the batch (e.g., `"observation.state"`)
 
 ### Run Serving
 
 ```sh
 cd FlagScale/
-python run.py --config-path ./examples/pi0/conf --config-name serve action=run
+flagscale serve qwen_gr00t -c ./examples/qwen_gr00t/conf/serve.yaml
 ```
 
-Serving logs are saved to `outputs/pi0_serve/logs/host_0_localhost.output` by default.
+Serving logs are saved to `outputs/<exp_name>/logs/host_0_localhost.output` by default.
 
 ### Stop Serving
 
 ```sh
 cd FlagScale/
-python run.py --config-path ./examples/pi0/conf --config-name serve action=stop
+flagscale serve qwen_gr00t --stop
 ```
-
-### Test Server with Client
-
-The client should send images using keys that match the `images_keys` in the config. For example, if using the default config:
-
-```sh
-cd FlagScale/
-python examples/pi0/client_pi0.py \
-  --host 127.0.0.1 \
-  --port 5000 \
-  --img1 ./inference_inputs/frame_100_observation_images_cam_high.jpg \
-  --img2 ./inference_inputs/frame_100_observation_images_cam_left_wrist.jpg \
-  --img3 ./inference_inputs/frame_100_observation_images_cam_right_wrist.jpg \
-  --state-path ./inference_inputs/frame_100_state.pt \
-  --instruction "Grab the orange and put it into the basket."
-```
-
-**Note**: The client must send image keys that match the `engine_args.images_keys` in the config.

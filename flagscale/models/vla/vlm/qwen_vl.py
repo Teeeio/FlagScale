@@ -1,8 +1,14 @@
+# Mainly adopted from:
+# https://github.com/starVLA/starVLA/blob/3f7feefbc5fc25890ad3a7d262b8a0aea1339aa7/starVLA/model/modules/vlm/QWen3.py
+
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import (
+    AutoConfig,
     AutoProcessor,
     PretrainedConfig,
     Qwen2_5_VLForConditionalGeneration,
@@ -10,7 +16,6 @@ from transformers import (
 )
 
 from flagscale.train.train_config import TrainConfig
-from flagscale.train.utils.image_tools import to_pil_preserve
 
 
 def _to_pil(img):
@@ -27,18 +32,6 @@ def _to_pil(img):
     return img
 
 
-IGNORE_INDEX = -100
-IMAGE_TOKEN_INDEX = 151655
-VIDEO_TOKEN_INDEX = 151656
-DEFAULT_IMAGE_TOKEN = "<image>"
-DEFAULT_VIDEO_TOKEN = "<video>"
-
-_ACTION_TOKEN_MIN_QWEN25 = 151665
-_ACTION_TOKEN_MAX_QWEN25 = 153712
-_ACTION_TOKEN_MIN_QWEN3 = 151669
-_ACTION_TOKEN_MAX_QWEN3 = 153716
-
-
 class QwenVLBackbone(nn.Module):
     """
     Base class for Qwen VL backends.
@@ -51,6 +44,16 @@ class QwenVLBackbone(nn.Module):
         super().__init__()
         qwenvl_config = config.model.qwenvl
         self.model_id = qwenvl_config.base_vlm
+        # When loading from checkpoint, base_vlm is resolved via OmegaConf
+        # interpolation: "${_pretrained_dir}/vlm_config" → absolute path.
+        self._load_pretrained = qwenvl_config.get("load_pretrained", True)
+        self._attn_implementation = qwenvl_config.get("attn_implementation", None)
+
+        if not self._load_pretrained and not Path(self.model_id).exists():
+            raise FileNotFoundError(
+                f"VLM config directory not found: {self.model_id}. "
+                "Ensure the checkpoint was saved with save_pretrained_artifacts."
+            )
 
         # TODO: (yupu) The model loaded by `from_pretrained` is eval mode by default, is this expected? I removed `policy.train()` in train_qwen_gr00t.py to match starVLA, but not sure if this is the right way to do this.
         self.model = self._load_model(self.model_id)
@@ -67,8 +70,55 @@ class QwenVLBackbone(nn.Module):
         """HF config object (e.g., Qwen2VLConfig)."""
         return self.model.config
 
-    def prepare_input(self, batch: dict) -> dict[str, torch.Tensor]:
+    def prepare_input(
+        self, batch: dict, image_feature_keys: list[str]
+    ) -> tuple[list[list[Image.Image]], list[str]]:
+        # TODO: (yupu) hard-code task key to "task"
+        instructions = batch["task"]
+        if isinstance(instructions, torch.Tensor):
+            instructions = instructions.detach().cpu().tolist()
+        if isinstance(instructions, str):
+            instructions = [instructions]
+
+        batch_images: list[list[Image.Image]] | None = None
+        for key in image_feature_keys:
+            imgs = batch[key]
+            if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
+                imgs = [imgs]
+            key_images = [_to_pil(img) for img in imgs]
+            if batch_images is None:
+                batch_images = [[img] for img in key_images]
+            else:
+                for sample_images, img in zip(batch_images, key_images):
+                    sample_images.append(img)
+
+        for idx, sample_images in enumerate(batch_images):
+            batch_images[idx] = [img for img in sample_images if img is not None]
+
+        return batch_images, instructions
+
+    def build_qwenvl_inputs(
+        self, images: list[list[Image.Image]], instructions: list[str]
+    ) -> dict[str, torch.Tensor]:
         raise NotImplementedError
+
+    def _build_messages(
+        self, images: list[list[Image.Image]], instructions: list[str]
+    ) -> list[list[dict]]:
+        messages = []
+        assert len(images) == len(instructions)
+        for imgs, instruction in zip(images, instructions):
+            content = [{"type": "image", "image": img} for img in imgs]
+
+            if "CoT_prompt" in self._config.data.vla_data:
+                cot_prompt = self._config.data.vla_data.get("CoT_prompt", "")
+                prompt = cot_prompt.replace("{instruction}", instruction)
+            else:
+                prompt = instruction
+
+            content.append({"type": "text", "text": prompt})
+            messages.append([{"role": "user", "content": content}])
+        return messages
 
     def forward(self, batch: dict[str, torch.Tensor], **kwargs) -> dict[str, torch.Tensor]:
         with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -81,136 +131,33 @@ class QwenVLBackbone(nn.Module):
         # TODO: (yupu) We should output the original outputs, not just the hidden states.
         return {"hidden_states": outputs.hidden_states}
 
+    def fsdp_units(self) -> list[nn.Module]:
+        return list(self.model.model.visual.blocks) + list(self.model.model.language_model.layers)
+
 
 class Qwen25VLBackbone(QwenVLBackbone):
     """Qwen2.5-VL backend."""
 
-    def __init__(self, config: TrainConfig, **kwargs):
-        super().__init__(config, **kwargs)
-        self._ACTION_TOKEN_MIN = _ACTION_TOKEN_MIN_QWEN25
-        self._ACTION_TOKEN_MAX = _ACTION_TOKEN_MAX_QWEN25
-
     def _load_model(self, model_id: str):
-        # WARNING: hard-coded attn_implementation and torch_dtype
+        attn_impl = self._attn_implementation or "flash_attention_2"
+        if not self._load_pretrained:
+            hf_config = AutoConfig.from_pretrained(
+                model_id, attn_implementation=attn_impl, torch_dtype="auto"
+            )
+            with torch.device("meta"):
+                return Qwen2_5_VLForConditionalGeneration(hf_config)
         return Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_id,
-            attn_implementation="flash_attention_2",
+            attn_implementation=attn_impl,
             torch_dtype="auto",
         )
 
-    def _resolve_image_keys(self, batch: dict) -> list[str]:
-        image_keys = None
-        vla_data_cfg = self._config.data.vla_data
-
-        # Backward-compatible path used by earlier train configs.
-        if "image_features" in vla_data_cfg and vla_data_cfg.image_features:
-            image_keys = list(vla_data_cfg.image_features)
-
-        # Fallback for configs that place ordering under data.image_key_order.
-        if (
-            not image_keys
-            and "image_key_order" in self._config.data
-            and self._config.data.image_key_order
-        ):
-            image_keys = list(self._config.data.image_key_order)
-
-        # Final fallback: infer from runtime batch payload.
-        if not image_keys:
-            preferred_keys = [
-                "observation.images.image",
-                "observation.images.wrist_image",
-                "observation.images.base_0_rgb",
-                "observation.images.left_wrist_0_rgb",
-                "observation.images.right_wrist_0_rgb",
-            ]
-            image_keys = [key for key in preferred_keys if key in batch]
-        if not image_keys:
-            image_keys = [key for key in batch.keys() if "image" in key]
-        if not image_keys:
-            raise KeyError(
-                "Cannot resolve image keys from config or batch. "
-                "Expected `data.vla_data.image_features`, `data.image_key_order`, or batch image keys."
-            )
-
-        return image_keys
-
-    def prepare_input(self, batch: dict) -> dict[str, torch.Tensor]:
-        # Centralize key resolution to support both old and new configs.
-        image_keys = self._resolve_image_keys(batch)
-        return self.build_qwenvl_inputs(examples=batch, image_keys=image_keys)
-
     def build_qwenvl_inputs(
-        self,
-        examples,
-        images=None,
-        instructions=None,
-        image_keys=None,
-        solutions=None,
-        **kwargs,
-    ):
-        # TODO: (yupu) This is so ugly, we should find a better way to handle this.
-        def _tensor_to_pil_list(batch_tensor):
-            if not isinstance(batch_tensor, torch.Tensor):
-                return batch_tensor
-            if batch_tensor.ndim == 3:
-                batch_tensor = batch_tensor.unsqueeze(0)
-            if batch_tensor.ndim != 4:
-                raise ValueError(f"Expected image tensor with 4 dims, got {batch_tensor.shape}")
-            pil_images = []
-            for item in batch_tensor:
-                if item.shape[-1] in (1, 3, 4):
-                    img = item
-                else:
-                    img = item.permute(1, 2, 0)
-                pil_images.append(to_pil_preserve(img.detach().cpu().numpy()))
-            return pil_images
-
-        if examples is not None and (images is None or instructions is None):
-            # TODO: (yupu) hard-code task key to "task"
-            instructions = examples["task"]
-            if isinstance(instructions, torch.Tensor):
-                instructions = instructions.detach().cpu().tolist()
-            if isinstance(instructions, str):
-                instructions = [instructions]
-
-            batch_images = None
-            for key in image_keys:
-                imgs = examples[key]
-                if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
-                    imgs = [imgs]
-                key_images = [_to_pil(img) for img in imgs]
-                if batch_images is None:
-                    batch_images = [[img] for img in key_images]
-                else:
-                    for sample_images, img in zip(batch_images, key_images):
-                        sample_images.append(img)
-
-            for idx, sample_images in enumerate(batch_images):
-                batch_images[idx] = [img for img in sample_images if img is not None]
-
-            images = batch_images
-
+        self, images: list[list[Image.Image]], instructions: list[str]
+    ) -> dict[str, torch.Tensor]:
         from qwen_vl_utils import process_vision_info
 
-        # Create messages: one message per sample
-        messages = []
-        assert len(images) == len(instructions)
-        for imgs, instruction in zip(images, instructions):
-            content = [{"type": "image", "image": img} for img in imgs]
-
-            if "CoT_prompt" in self._config.data.vla_data:
-                CoT_prompt = self._config.data.vla_data.get("CoT_prompt", "")
-                prompt = CoT_prompt.replace("{instruction}", instruction)
-            else:
-                prompt = instruction
-
-            content.append({"type": "text", "text": prompt})
-            msg = [{"role": "user", "content": content}]
-
-            if solutions is not None:
-                solution = solutions[len(messages)]
-                msg.append({"role": "assistant", "content": [{"type": "text", "text": solution}]})
-            messages.append(msg)
+        messages = self._build_messages(images, instructions)
 
         # Prepare text prompts using processor
         # default process is json --> message --> texts --> input_ids
@@ -225,149 +172,36 @@ class Qwen25VLBackbone(QwenVLBackbone):
             text=texts, images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt"
         )
 
-        # if solutions, mask out the non solution tokens in labels --> @JinhuiYE can we mask out system prompt?
-        if solutions is not None:
-            # how can we know this range? --> we has other way for this, but is slower see qwenhelix branch
-            # here only for fast_tokenizer, see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md
-            labels = batch_input["input_ids"].clone()
-            # For each sequence in the batch, find the first occurrence of an action token.
-            for i in range(labels.size(0)):
-                seq = labels[i]
-                # Create a mask for tokens within the action token range.
-                mask_seq = (seq >= self._ACTION_TOKEN_MIN) & (seq <= self._ACTION_TOKEN_MAX)
-                nonzero_indices = torch.nonzero(mask_seq, as_tuple=False)
-                if nonzero_indices.numel() > 0:
-                    first_action_index = nonzero_indices[0].item()
-                    # Mask out all tokens before the first action token.
-                    seq[:first_action_index] = IGNORE_INDEX
-                else:
-                    seq[:] = IGNORE_INDEX
-                    RuntimeWarning(
-                        "action token are on in your tokenizer, plz see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md."
-                    )
-            labels[labels == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
-            batch_input["labels"] = labels
-
-        return batch_input.to(self.model.device)
+        # Use current CUDA device instead of self.model.device, which returns
+        # a DTensor device under FSDP2 and causes mixed Tensor/DTensor errors.
+        return batch_input.to(f"cuda:{torch.cuda.current_device()}")
 
 
 class Qwen3VLBackbone(QwenVLBackbone):
     """Qwen3-VL backend."""
 
-    def __init__(self, config: TrainConfig, **kwargs):
-        super().__init__(config, **kwargs)
-
-        # Only for fast base model
-        if "-Action" in self.model_id:
-            self._ACTION_TOKEN_MIN = _ACTION_TOKEN_MIN_QWEN3
-            self._ACTION_TOKEN_MAX = _ACTION_TOKEN_MAX_QWEN3
-
     def _load_model(self, model_id: str) -> Qwen3VLForConditionalGeneration:
-        # FIXME: hard-coded attn_implementation and torch_dtype matches starVLA
-        # TODO: (yupu): During inference/serving, it's required to load model twice, not only that, the original qwen model has to be loaded!
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            model_id,
-            attn_implementation="flash_attention_2",
-            torch_dtype=torch.bfloat16,
-        )
-        # Align dims qwen3 with qwen2.5, actually it's not needed in our case
-        model.config.hidden_size = model.config.text_config.hidden_size
+        attn_impl = self._attn_implementation or "flash_attention_2"
+        if not self._load_pretrained:
+            hf_config = AutoConfig.from_pretrained(
+                model_id, attn_implementation=attn_impl, torch_dtype=torch.bfloat16
+            )
+            with torch.device("meta"):
+                model = Qwen3VLForConditionalGeneration(hf_config)
+        else:
+            # FIXME: hard-coded torch_dtype matches starVLA
+            model = Qwen3VLForConditionalGeneration.from_pretrained(
+                model_id,
+                attn_implementation=attn_impl,
+                torch_dtype=torch.bfloat16,
+            )
+
         return model
 
-    def prepare_input(self, batch: dict) -> dict[str, torch.Tensor]:
-        # TODO: (yupu) This is a hack, we should find a better way to handle this.
-        # image_keys = self._config.data.vla_data.image_features.keys()
-        image_keys = ["observation.images.image", "observation.images.wrist_image"]
-
-        # Extract data in starVLA format (list of dicts)
-        # examples = batch
-        # batch_images = [example["image"] for example in examples]  # [B, [PIL]]
-        # instructions = [example["lang"] for example in examples]  # [B, str]
-        # actions = [example["action"] for example in examples]  # [B, T, action_dim]
-        # state = None
-
-        # return self.build_qwenvl_inputs(
-        #     examples=None, images=batch_images, instructions=instructions
-        # )
-
-        return self.build_qwenvl_inputs(examples=batch, image_keys=image_keys)
-
-    # TODO: (yupu) Refactor this args
     def build_qwenvl_inputs(
-        self,
-        examples,
-        images=None,
-        instructions=None,
-        image_keys=None,
-        solutions=None,
-        **kwargs,
-    ):
-        # TODO: (yupu) This is so ugly, we should find a better way to handle this.
-        def _tensor_to_pil_list(batch_tensor):
-            if not isinstance(batch_tensor, torch.Tensor):
-                return batch_tensor
-            if batch_tensor.ndim == 3:
-                batch_tensor = batch_tensor.unsqueeze(0)
-            if batch_tensor.ndim != 4:
-                raise ValueError(f"Expected image tensor with 4 dims, got {batch_tensor.shape}")
-            pil_images = []
-            for item in batch_tensor:
-                if item.shape[-1] in (1, 3, 4):
-                    img = item
-                else:
-                    img = item.permute(1, 2, 0)
-                pil_images.append(to_pil_preserve(img.detach().cpu().numpy()))
-            return pil_images
-
-        if examples is not None and (images is None or instructions is None):
-            # TODO: (yupu) hard-code task key to "task"
-            instructions = examples["task"]
-            if isinstance(instructions, torch.Tensor):
-                instructions = instructions.detach().cpu().tolist()
-            if isinstance(instructions, str):
-                instructions = [instructions]
-
-            batch_images = None
-            for key in image_keys:
-                imgs = examples[key]
-                if isinstance(imgs, torch.Tensor) and imgs.ndim == 3:
-                    imgs = [imgs]
-                key_images = [_to_pil(img) for img in imgs]
-                if batch_images is None:
-                    batch_images = [[img] for img in key_images]
-                else:
-                    for sample_images, img in zip(batch_images, key_images):
-                        sample_images.append(img)
-
-            for idx, sample_images in enumerate(batch_images):
-                batch_images[idx] = [img for img in sample_images if img is not None]
-
-            images = batch_images
-
-        # import numpy as np
-
-        # torch.save(np.array([np.array(img) for img in images[0]]), "raw_images.pt")
-        # assert False
-
-        # Create messages: one message per sample
-        messages = []
-        assert len(images) == len(instructions)
-        for imgs, instruction in zip(images, instructions):
-            content = [{"type": "image", "image": img} for img in imgs]
-
-            if "CoT_prompt" in self._config.data.vla_data:
-                CoT_prompt = self._config.data.vla_data.get("CoT_prompt", "")
-                prompt = CoT_prompt.replace("{instruction}", instruction)
-            else:
-                prompt = instruction
-
-            content.append({"type": "text", "text": prompt})
-            msg = [{"role": "user", "content": content}]
-
-            if solutions is not None:
-                solution = solutions[len(messages)]
-                msg.append({"role": "assistant", "content": [{"type": "text", "text": solution}]})
-            messages.append(msg)
+        self, images: list[list[Image.Image]], instructions: list[str]
+    ) -> dict[str, torch.Tensor]:
+        messages = self._build_messages(images, instructions)
 
         # Preparation for inference
         batch_inputs = self.processor.apply_chat_template(
@@ -379,30 +213,6 @@ class Qwen3VLBackbone(QwenVLBackbone):
             return_tensors="pt",
         )
 
-        # if solutions, mask out the solution tokens in labels
-        # here only for fast_tokenizer now.
-        if solutions is not None:
-            # how can we know this range? --> we has other way for this, but is slower see qwenhelix branch
-            # here only for fast_tokenizer, see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md
-            labels = batch_inputs["input_ids"].clone()
-            # For each sequence in the batch, find the first occurrence of an action token.
-            for i in range(labels.size(0)):
-                seq = labels[i]
-                # Create a mask for tokens within the action token range.
-                mask_seq = (seq >= self._ACTION_TOKEN_MIN) & (seq <= self._ACTION_TOKEN_MAX)
-                nonzero_indices = torch.nonzero(mask_seq, as_tuple=False)
-                if nonzero_indices.numel() > 0:
-                    # Mask out all tokens before the first action token.
-                    seq[: nonzero_indices[0].item()] = IGNORE_INDEX
-                else:
-                    # If no action token is found, mask the entire sequence.
-                    seq[:] = IGNORE_INDEX
-                    RuntimeWarning(
-                        "action token are on in your tokenizer, plz see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md."
-                    )
-
-            # Mask out pad tokens as well
-            labels[labels == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
-            batch_inputs["labels"] = labels
-
-        return batch_inputs.to(self.model.device)
+        # Use current CUDA device instead of self.model.device, which returns
+        # a DTensor device under FSDP2 and causes mixed Tensor/DTensor errors.
+        return batch_inputs.to(f"cuda:{torch.cuda.current_device()}")

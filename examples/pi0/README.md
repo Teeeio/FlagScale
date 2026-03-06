@@ -147,14 +147,6 @@ Configure the following fields:
 **System settings** (training hyperparameters):
 - `system.batch_size` - Batch size per GPU
 - `system.train_steps` - Total training steps
-- `system.optimizer.name` - Optimizer name (default: `"AdamW"`)
-- `system.optimizer.lr` - Learning rate (default: `2.5e-5`)
-- `system.optimizer.betas` - Optimizer betas (default: `[0.9, 0.95]`)
-- `system.optimizer.eps` - Optimizer epsilon (default: `1.0e-8`)
-- `system.optimizer.weight_decay` - Weight decay (default: `0.01`)
-- `system.scheduler.warmup_steps` - Warmup steps (default: `1000`)
-- `system.scheduler.decay_steps` - Decay steps (default: `30000`)
-- `system.scheduler.decay_lr` - Final learning rate after decay (default: `2.5e-6`)
 - `system.checkpoint.save_checkpoint` - Whether to save checkpoints (default: `true`)
 - `system.checkpoint.save_freq` - Steps between checkpoints (default: `1000`)
 - `system.checkpoint.output_directory` - Checkpoint output directory (default: `${experiment.exp_dir}`)
@@ -165,6 +157,14 @@ Configure the following fields:
 - `model.tokenizer_path` - Path to tokenizer (e.g., `/workspace/models/google/paligemma-3b-pt-224`)
 - `model.tokenizer_max_length` - Maximum tokenizer sequence length
 - `model.action_steps` - Number of action steps to predict
+- `model.optimizer.name` - Optimizer name (for example: `"AdamW"`)
+- `model.optimizer.lr` - Learning rate (for example: `2.5e-5`)
+- `model.optimizer.betas` - Optimizer betas (for example: `[0.9, 0.95]`)
+- `model.optimizer.eps` - Optimizer epsilon (for example: `1.0e-8`)
+- `model.optimizer.weight_decay` - Weight decay (for example: `0.01`)
+- `model.optimizer.scheduler.warmup_steps` - Warmup steps (for example: `1000`)
+- `model.optimizer.scheduler.decay_steps` - Decay steps (for example: `30000`)
+- `model.optimizer.scheduler.decay_lr` - Final learning rate after decay (for example: `2.5e-6`)
 
 **Data settings**:
 - `data.data_path` - Path to LeRobot dataset root (e.g., `/workspace/datasets/lerobot/aloha_mobile_cabinet`)
@@ -181,7 +181,9 @@ Configure the following fields:
 ### Start Training
 ```sh
 cd FlagScale/
-python run.py --config-path ./examples/pi0/conf --config-name train action=run
+flagscale train pi0 --config ./examples/pi0/conf/train.yaml
+# or
+flagscale train pi0 -c ./examples/pi0/conf/train.yaml
 ```
 
 Training logs are saved to `outputs/pi0_train/logs/host_0_localhost.output` by default.
@@ -191,7 +193,7 @@ Checkpoints are saved to `${experiment.exp_dir}/checkpoints` (default: `outputs/
 ### Stop Training
 ```sh
 cd FlagScale/
-python run.py --config-path ./examples/pi0/conf --config-name train action=stop
+flagscale train pi0 --stop
 ```
 
 ## Inference
@@ -270,10 +272,9 @@ Configure the following fields:
 
 ```sh
 cd FlagScale/
-python run.py \
-    --config-path ./examples/pi0/conf \
-    --config-name inference \
-    action=run
+flagscale inference pi0 --config ./examples/pi0/conf/inference.yaml
+# or
+flagscale inference pi0 -c ./examples/pi0/conf/inference.yaml
 ```
 
 Inference logs are saved to `outputs/pi0_inference/inference_logs/host_0_localhost.output` by default.
@@ -312,7 +313,9 @@ Configure the following fields:
 
 ```sh
 cd FlagScale/
-python run.py --config-path ./examples/pi0/conf --config-name serve action=run
+flagscale serve pi0 --config ./examples/pi0/conf/serve.yaml
+# or
+flagscale serve pi0 -c ./examples/pi0/conf/serve.yaml
 ```
 
 Serving logs are saved to `outputs/pi0_serve/logs/host_0_localhost.output` by default.
@@ -321,7 +324,7 @@ Serving logs are saved to `outputs/pi0_serve/logs/host_0_localhost.output` by de
 
 ```sh
 cd FlagScale/
-python run.py --config-path ./examples/pi0/conf --config-name serve action=stop
+flagscale serve pi0 --stop
 ```
 
 ### Test Server with Client

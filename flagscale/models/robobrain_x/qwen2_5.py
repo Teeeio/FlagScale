@@ -51,10 +51,10 @@ class _QWen_VL_Interface(nn.Module):
                 where:
                     framework.qwenvl.base_vlm (str): HuggingFace model id or local path.
                 Optional expected structure (illustrative):
-                    config.model.qwenvl -> {
+                    config.framework.get("qwenvl", {}) -> {
                         "base_vlm": "Qwen/Qwen2.5-VL-3B-Instruct"
                     }
-                    config.data.vla_data.get("CoT_prompt", str) may be used later in build_qwenvl_inputs.
+                    config.datasets.vla_data.get("CoT_prompt", str) may be used later in build_qwenvl_inputs.
             **kwargs:
                 Ignored currently; placeholder for future extension (e.g., override device_map, dtype).
 
@@ -74,7 +74,7 @@ class _QWen_VL_Interface(nn.Module):
         """
         super().__init__()
 
-        qwenvl_config = config.model.qwenvl
+        qwenvl_config = config.framework.get("qwenvl", {})
         model_id = qwenvl_config.get("base_vlm", "Qwen/Qwen2.5-VL-3B-Instruct")
 
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
@@ -191,7 +191,7 @@ class _QWen_VL_Interface(nn.Module):
                 Reserved for future extensions (e.g., system prompts, style controls, additional metadata).
 
         Config Dependencies:
-            self.config.data.vla_data.get("CoT_prompt", str):
+            self.config.datasets.vla_data.get("CoT_prompt", str):
                 If present, each instruction string is injected into the template by replacing "{instruction}".
 
         Returns:
@@ -230,8 +230,8 @@ class _QWen_VL_Interface(nn.Module):
         for imgs, instruction in zip(images, instructions):
             content = [{"type": "image", "image": img} for img in imgs]
 
-            if "CoT_prompt" in self.config.data.vla_data:  # If using a grounding prompt to task
-                CoT_prompt = self.config.data.vla_data.get("CoT_prompt", "")
+            if "CoT_prompt" in self.config.datasets.vla_data:  # If using a grounding prompt to task
+                CoT_prompt = self.config.datasets.vla_data.get("CoT_prompt", "")
                 prompt = CoT_prompt.replace("{instruction}", instruction)
             else:
                 prompt = instruction

@@ -7,45 +7,28 @@ import random
 import time
 from collections.abc import Iterator
 from contextlib import nullcontext
-from typing import Any, TypedDict
-
-try:
-    from typing import Unpack  # Python 3.11+
-except ImportError:
-    from typing_extensions import Unpack  # Python < 3.11
+from pathlib import Path
+from typing import Any
 
 from omegaconf import OmegaConf, DictConfig
 import numpy as np
+from PIL import Image
 import torch
 import torch.distributed as dist
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from torch.optim import Optimizer
-# from torch.nn.parallel import DistributedDataParallel as DDP  # Commented out: using accelerate instead
 
-# Accelerate for distributed training (matching starVLA)
-from accelerate import Accelerator, DeepSpeedPlugin
-from accelerate.utils import DistributedDataParallelKwargs, set_seed as accelerate_set_seed
-
-from flagscale.runner.utils import logger
+from flagscale.logger import logger
 from flagscale.train.train_config import TrainConfig, DataConfig
-from flagscale.train.datasets.transforms import ImageTransforms
 from flagscale.train.datasets.lerobot_dataset import (
     LeRobotDataset,
     LeRobotDatasetMetadata,
 )
 from flagscale.train.datasets.utils import dataset_to_policy_features
-from flagscale.train.processor import PolicyAction, PolicyProcessorPipeline
-from flagscale.train.processor.converters import (
-    batch_to_transition,
-    policy_action_to_transition,
-    transition_to_batch,
-    transition_to_policy_action,
-)
-from flagscale.models.utils.constants import (
-    POLICY_POSTPROCESSOR_DEFAULT_NAME,
-    POLICY_PREPROCESSOR_DEFAULT_NAME,
-)
-from flagscale.models.configs.types import PolicyFeature
-from flagscale.models.utils.constants import ACTION, OBS_PREFIX, REWARD
+from flagscale.train.processor import PolicyProcessorPipeline
+from flagscale.models.utils.constants import ACTION, OBS_PREFIX, PRETRAINED_MODEL_DIR, REWARD
 from flagscale.models.configs.types import FeatureType
 from flagscale.train.utils.logging_utils import (
     AverageMeter,
@@ -53,332 +36,52 @@ from flagscale.train.utils.logging_utils import (
     format_big_number,
 )
 from flagscale.train.utils.train_utils import (
-    save_checkpoint,
+    save_vla_checkpoint,
     get_step_checkpoint_dir,
     update_last_checkpoint,
 )
 from flagscale.train.utils.optim_setup import setup_optimizer_and_scheduler
 from flagscale.models.vla.qwen_gr00t import QwenGr00t
-from flagscale.models.qwen_pi.qwen_pi import Qwen_PI
-
-IMAGENET_STATS = {
-    "mean": [[[0.485]], [[0.456]], [[0.406]]],  # (c,1,1)
-    "std": [[[0.229]], [[0.224]], [[0.225]]],  # (c,1,1)
-}
-
-from PIL import Image
-from torch.utils.data import Dataset as TorchDataset
-
-
-def collate_fn_starvla(batch):
-    """Simple collate function that returns batch as list of dicts (starVLA style)."""
-    return batch
-
-
-class StarVLAFormatDataset(TorchDataset):
-    """
-    Wrapper dataset that converts FlagScale tensor images to match starVLA format.
-
-    Conversion to match starVLA exactly:
-    1. FlagScale tensor: float32 CHW, [0,1] range
-    2. Convert to uint8 HWC: multiply by 255, permute, cast to uint8
-    3. PIL.fromarray + resize (same as starVLA)
-
-    starVLA format:
-        dict(
-            action=np.ndarray [T, action_dim],  # float16
-            image=[PIL.Image, ...],             # list of PIL images (224x224)
-            lang=str,                           # language instruction
-        )
-    """
-
-    def __init__(
-        self,
-        dataset: "LeRobotDataset",
-        image_keys: list[str] = None,
-        image_size: tuple[int, int] = (224, 224),
-    ):
-        self.dataset = dataset
-        self.image_keys = image_keys or [
-            "observation.images.image",
-            "observation.images.wrist_image",
-        ]
-        self.image_size = image_size
-
-        # Get action stats for min_max normalization (matching starVLA's StateActionTransform)
-        action_stats = dataset.meta.stats.get("action", {})
-        self.action_min = action_stats.get("min", None)
-        self.action_max = action_stats.get("max", None)
-        # Convert to numpy if needed
-        if self.action_min is not None and hasattr(self.action_min, "numpy"):
-            self.action_min = self.action_min.numpy()
-        if self.action_max is not None and hasattr(self.action_max, "numpy"):
-            self.action_max = self.action_max.numpy()
-
-    def __len__(self):
-        return len(self.dataset)
-
-    @property
-    def num_frames(self):
-        return self.dataset.num_frames
-
-    @property
-    def num_episodes(self):
-        return self.dataset.num_episodes
-
-    def _tensor_to_pil_starvla(self, tensor: torch.Tensor) -> Image.Image:
-        """
-        Convert tensor to PIL exactly like starVLA:
-        1. tensor is float32 CHW [0,1] from torchcodec
-        2. Convert to uint8 HWC [0,255]
-        3. PIL.fromarray + resize
-        """
-        # Remove batch dim if present
-        if tensor.ndim == 4:
-            tensor = tensor[0]
-
-        # CHW -> HWC
-        if tensor.shape[0] in (1, 3, 4):
-            tensor = tensor.permute(1, 2, 0)
-
-        # float32 [0,1] -> uint8 [0,255]
-        img_np = (tensor.detach().cpu().numpy() * 255).astype(np.uint8)
-
-        # PIL.fromarray + resize (exactly like starVLA)
-        pil_img = Image.fromarray(img_np).resize(self.image_size)
-        return pil_img
-
-    def __getitem__(self, idx: int) -> dict:
-        item = self.dataset[idx]
-
-        # Convert images to PIL format (matching starVLA processing)
-        images = []
-        for key in self.image_keys:
-            if key in item:
-                pil_img = self._tensor_to_pil_starvla(item[key])
-                images.append(pil_img)
-
-        # Get action (convert to numpy float16 like starVLA)
-        action = item["action"]
-        if isinstance(action, torch.Tensor):
-            action = action.detach().cpu().numpy()
-
-        # Apply min_max normalization (matching starVLA's Libero4in1DataConfig exactly)
-        # starVLA only normalizes action.x, y, z, roll, pitch, yaw (indices 0-5)
-        # action.gripper (index 6) is NOT normalized
-        # Formula: 2 * (x - min) / (max - min) - 1
-        if self.action_min is not None and self.action_max is not None:
-            # Only normalize first 6 dimensions (x, y, z, roll, pitch, yaw)
-            # Keep gripper (dim 6) as raw value
-            normalize_dims = 6  # Only normalize first 6 dims
-            action_range = self.action_max[:normalize_dims] - self.action_min[:normalize_dims]
-            mask = action_range > 1e-8
-
-            normalized = action.copy()
-            # Normalize dimensions 0-5 where range > 0
-            for i in range(normalize_dims):
-                if mask[i]:
-                    normalized[..., i] = (action[..., i] - self.action_min[i]) / action_range[i]
-                    normalized[..., i] = 2.0 * normalized[..., i] - 1.0
-                else:
-                    normalized[..., i] = 0.0
-            # Keep dimension 6 (gripper) as-is (no normalization)
-            action = normalized
-
-        action = action.astype(np.float16)
-
-        # Get language instruction
-        lang = item.get("task", "")
-        if isinstance(lang, torch.Tensor):
-            lang = lang.item() if lang.numel() == 1 else str(lang.tolist())
-
-        # Get trajectory_id and frame_index for debugging (matching starVLA format)
-        trajectory_id = item.get("episode_index", -1)
-        if isinstance(trajectory_id, torch.Tensor):
-            trajectory_id = trajectory_id.item()
-        frame_index = item.get("index", idx)
-        if isinstance(frame_index, torch.Tensor):
-            frame_index = frame_index.item()
-
-        return dict(
-            action=action,
-            image=images,
-            lang=lang,
-            trajectory_id=trajectory_id,
-            frame_index=frame_index,
-        )
-
-
-def register_debug_hooks(model_obj):
-    """
-    给模型挂载带有 Rank 信息的 Forward 和 Backward Hook
-    model_obj: 可以是 model (list) 也可以是 model[0] (module)
-    """
-
-    # 1. 获取 Rank 的辅助函数
-    def get_rank():
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            return torch.distributed.get_rank()
-        return 0
-
-    # 2. 通用打印函数
-    def calc_and_print(tensor, name, tag):
-        """
-        tensor: 要打印的张量
-        name: 模块名称 + 参数位置
-        tag: FWD 或 BWD
-        """
-        if tensor is None:
-            return
-        # 仅处理 Tensor，忽略 None 或其他类型
-        if isinstance(tensor, torch.Tensor):
-            # 获取当前 Rank
-            rank = get_rank()
-            # 计算 sum (转为 float32 防止溢出，item() 会触发同步确保数值准确)
-            # 注意：打印日志会显著降低训练速度，仅用于 Debug
-            val = torch.sum(tensor.detach().to(torch.float32)).item()
-            # 打印格式：[Rank 0][FWD] layers.0.self_attention sum: 1234.56
-            print(f"[Rank {rank}][{tag}] {name} sum: {val}", flush=True)
-
-    # 3. 前向 Hook 定义
-    def forward_wrapper(name):
-        def forward_hook(module, input, output):
-            # 打印 Input (元组或张量)
-            if isinstance(input, (list, tuple)):
-                for i, item in enumerate(input):
-                    calc_and_print(item, f"{name}.input[{i}]", "FWD")
-            else:
-                calc_and_print(input, f"{name}.input", "FWD")
-            # 打印 Output
-            if isinstance(output, (list, tuple)):
-                for i, item in enumerate(output):
-                    calc_and_print(item, f"{name}.output[{i}]", "FWD")
-            else:
-                calc_and_print(output, f"{name}.output", "FWD")
-
-        return forward_hook
-
-    # 4. 反向 Hook 定义 (使用 register_full_backward_hook)
-    def backward_wrapper(name):
-        def backward_hook(module, grad_input, grad_output):
-            # grad_output: 从上一层流回来的梯度 (反向传播的“输入”)
-            if isinstance(grad_output, (list, tuple)):
-                for i, g in enumerate(grad_output):
-                    calc_and_print(g, f"{name}.grad_output[{i}]", "BWD")
-            else:
-                calc_and_print(grad_output, f"{name}.grad_output", "BWD")
-            # grad_input: 当前层计算出的梯度 (准备传给下一层)
-            if isinstance(grad_input, (list, tuple)):
-                for i, g in enumerate(grad_input):
-                    calc_and_print(g, f"{name}.grad_input[{i}]", "BWD")
-            else:
-                calc_and_print(grad_input, f"{name}.grad_input", "BWD")
-
-        return backward_hook
-
-    # 5. 开始注册
-    # 兼容 list 结构
-    actual_module = model_obj[0] if isinstance(model_obj, list) else model_obj
-    print(f"Rank {get_rank()}: 开始挂载 Debug Hooks (仅叶子层)...", flush=True)
-    # 遍历所有子模块
-    for name, module in actual_module.named_modules():
-        # 【核心修改】跳过容器层，只Hook叶子层（没有子模块的层）
-        # 这样可以避免 Hook 顶层模块导致的 View 属性变化，同时也能覆盖所有计算
-        if len(list(module.children())) > 0:
-            continue
-        # 额外的黑名单（可选）：跳过一些不重要的层，比如 Dropout
-        if isinstance(module, torch.nn.Dropout):
-            continue
-        # 注册 FWD Hook
-        handle_fwd = module.register_forward_hook(forward_wrapper(name))
-        # 注册 BWD Hook
-        handle_bwd = module.register_full_backward_hook(backward_wrapper(name))
-
-
-def remove_debug_hooks_force(model_obj):
-    """
-    暴力清除模型中所有的 hook，不需要 handle。
-    """
-    actual_module = model_obj[0] if isinstance(model_obj, list) else model_obj
-    print("Force removing all hooks...", flush=True)
-    for module in actual_module.modules():
-        # 清除前向 hook
-        if hasattr(module, "_forward_hooks"):
-            module._forward_hooks.clear()
-        # 清除反向 hook
-        if hasattr(module, "_backward_hooks"):
-            module._backward_hooks.clear()
-    print("Hooks force removed.", flush=True)
-
-
-# Commented out: using accelerate's set_seed instead
-# def set_seed(seed: int):
-#     np.random.seed(seed)
-#     random.seed(seed)
-#     torch.manual_seed(seed)
-#     if torch.cuda.is_available():
-#         torch.cuda.manual_seed_all(seed)
-#
-#     torch.backends.cudnn.enabled = True
-#     torch.backends.cudnn.benchmark = True
-#     torch.backends.cudnn.deterministic = True
-#     torch.backends.cuda.matmul.allow_tf32 = True
 
 
 def set_seed(seed: int):
-    """Wrapper around accelerate's set_seed with additional cudnn settings."""
-    accelerate_set_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = False
     torch.backends.cuda.matmul.allow_tf32 = False
 
 
-# Commented out: using accelerate instead of manual DDP
-# def init_ddp():
-#     local_rank = int(os.environ["LOCAL_RANK"])
-#     torch.cuda.set_device(local_rank)
-#     torch.distributed.init_process_group(backend="nccl", init_method="env://")
-#     return local_rank
+def apply_fsdp2(policy, device_mesh):
+    """Apply FSDP2 sharding to QwenGr00t.
 
-# Initialize Accelerator at module level (matching starVLA)
-use_deepspeed = os.environ.get("USE_DEEPSPEED", "true").lower() == "true"
-ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-if use_deepspeed:
-    ds_config_path = os.environ.get("DS_CONFIG", None)
-    deepspeed_plugin = (
-        DeepSpeedPlugin(hf_ds_config=ds_config_path)
-        if ds_config_path
-        else DeepSpeedPlugin(
-            zero_stage=2,
-            gradient_clipping=1.0,
-        )
+    Uses a MixedPrecisionPolicy that matches DeepSpeed bf16 behavior:
+      bf16.enabled=true + ZeRO-2 → param_dtype=bf16, reduce_dtype=bf16, reshard=False
+    """
+    # Cast everything to fp32 first so the root param group has uniform dtype.
+    policy = policy.float()
+
+    # `reduce_dtype=torch.float32` would make evaluation on libero_goal drop to 94.8% (from 97.0%)
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=torch.bfloat16,
+        reduce_dtype=torch.bfloat16,
     )
-    accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin, kwargs_handlers=[ddp_kwargs])
-else:
-    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+    fsdp_config = {"mesh": device_mesh, "mp_policy": mp_policy}
 
+    # reshard_after_forward=False keeps params unsharded during forward+backward
+    reshard = False
 
-# TODO: (yupu) Re-enable wandb
-# def init_wandb(config, *, resuming: bool, log_code: bool = False, enabled: bool = True):
-#     if not enabled:
-#         wandb.init(mode="disabled")
-#         return
+    for unit in policy.vlm.fsdp_units():
+        fully_shard(unit, **fsdp_config, reshard_after_forward=reshard)
 
-#     ckpt_dir = pathlib.Path(config.checkpoint_dir)
-#     if not ckpt_dir.exists():
-#         raise FileNotFoundError(f"Checkpoint directory {ckpt_dir} does not exist.")
-#     if resuming:
-#         run_id = (ckpt_dir / "wandb_id.txt").read_text().strip()
-#         wandb.init(id=run_id, resume="must", project=config.project_name)
-#     else:
-#         wandb.init(
-#             name=config.exp_name, config=vars(config), project=config.project_name
-#         )
-#         (ckpt_dir / "wandb_id.txt").write_text(wandb.run.id)
+    for unit in policy.action_model.fsdp_units():
+        fully_shard(unit, **fsdp_config, reshard_after_forward=reshard)
 
-#     if log_code:
-#         wandb.run.log_code(epath.Path(__file__).parent.parent)
+    fully_shard(policy, **fsdp_config)
 
 
 def make_dataset(cfg: DataConfig):
@@ -429,8 +132,6 @@ def make_dataset(cfg: DataConfig):
 
     def _resize_to_uint8_hwc(frame: torch.Tensor) -> torch.Tensor:
         """float32 CHW [0,1] from torchcodec → uint8 HWC 224x224 via PIL resize."""
-        from PIL import Image
-        import numpy as np
 
         frame_uint8 = (frame.permute(1, 2, 0) * 255).round().clamp(0, 255).to(torch.uint8)
         # PIL default is BICUBIC, matching starVLA's Image.fromarray(image).resize((224, 224))
@@ -451,11 +152,6 @@ def make_dataset(cfg: DataConfig):
         video_backend=video_backend,
         tolerance_s=cfg.tolerance_s,
     )
-
-    if cfg.use_imagenet_stats:
-        for key in dataset.meta.camera_keys:
-            for stats_type, stats in IMAGENET_STATS.items():
-                dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
 
     return dataset
 
@@ -515,28 +211,6 @@ def cycle(iterable: Any) -> Iterator[Any]:
             iterator = iter(iterable)
 
 
-def raise_feature_mismatch_error(
-    provided_features: set[str],
-    expected_features: set[str],
-) -> None:
-    """
-    Raises a standardized ValueError for feature mismatches between dataset/environment and policy config.
-    """
-    missing = expected_features - provided_features
-    extra = provided_features - expected_features
-    # TODO (jadechoghari): provide a dynamic rename map suggestion to the user.
-    raise ValueError(
-        f"Feature mismatch between dataset/environment and policy config.\n"
-        f"- Missing features: {sorted(missing) if missing else 'None'}\n"
-        f"- Extra features: {sorted(extra) if extra else 'None'}\n\n"
-        f"Please ensure your dataset and policy use consistent feature names.\n"
-        f"If your dataset uses different observation keys (e.g., cameras named differently), "
-        f"use the `--rename_map` argument, for example:\n"
-        f'  --rename_map=\'{{"observation.images.left": "observation.images.camera1", '
-        f'"observation.images.top": "observation.images.camera2"}}\''
-    )
-
-
 def format_train_tracker_step(train_tracker: MetricsTracker) -> str:
     def _format_meter_val(meter: AverageMeter) -> str:
         fmt = meter.fmt[1:] if meter.fmt.startswith(":") else meter.fmt
@@ -552,61 +226,16 @@ def format_train_tracker_step(train_tracker: MetricsTracker) -> str:
     return " ".join(display_list)
 
 
-# def validate_visual_features_consistency(
-#     cfg: PI0Config,
-#     features: dict[str, PolicyFeature],
-# ) -> None:
-#     """
-#     Validates visual feature consistency between a policy config and provided dataset/environment features.
-
-#     Args:
-#         cfg (PreTrainedConfig): The model or policy configuration containing input_features and type.
-#         features (Dict[str, PolicyFeature]): A mapping of feature names to PolicyFeature objects.
-#     """
-#     expected_visuals = {k for k, v in cfg.input_features.items() if v.type == FeatureType.VISUAL}
-#     provided_visuals = {k for k, v in features.items() if v.type == FeatureType.VISUAL}
-#     if not provided_visuals.issubset(expected_visuals):
-#         raise_feature_mismatch_error(provided_visuals, expected_visuals)
-
 
 def make_policy(
     config: TrainConfig,
     ds_meta: LeRobotDatasetMetadata | None = None,
 ):
-    """
-    Instantiate a policy model.
-
-    This factory function handles the logic of creating a policy, which requires
-    determining the input and output feature shapes. These shapes can be derived
-    either from a `LeRobotDatasetMetadata` object or an `EnvConfig` object. The function
-    can either initialize a new policy from scratch or load a pretrained one.
-
-    Args:
-        cfg: The configuration for the policy to be created (PI0Config or PI05Config).
-             If `cfg.pretrained_path` is set, the policy will be loaded with weights from that path.
-        ds_meta: Dataset metadata used to infer feature shapes and types. Also provides
-                 statistics for normalization layers.
-        rename_map: Optional mapping of dataset or environment feature keys to match
-                 expected policy feature names (e.g., `"left"` → `"camera1"`).
-        model_variant: Model variant to use, either "pi0" or "pi0.5".
-
-    Returns:
-        An instantiated and device-placed policy model (PI0Policy or PI05Policy).
-    """
-
-    # # Select policy class based on model variant
-    # if model_variant == "pi0.5":
-    #     policy_cls = PI05Policy
-    # else:
-    #     policy_cls = PI0Policy
-
-    kwargs = {}
     features = dataset_to_policy_features(ds_meta.features)
 
-    # FIXME
+    # Use == instead of `is` for FeatureType.ACTION comparison
+    # because flagscale.FeatureType and lerobot.FeatureType are different enum classes
     output_features = {
-        # Changed from ft.type is FeatureType.ACTION to ft.type == FeatureType.ACTION
-        # for different enum classes: flagscale.FeatureType vs lerobot.FeatureType
         key: ft
         for key, ft in features.items()
         if ft.type == FeatureType.ACTION
@@ -634,36 +263,11 @@ def make_policy(
     config.data.vla_data.image_features = ordered_visual_keys
 
     policy = QwenGr00t(config=config)
-    # policy = Qwen_PI(config=config)
-    print(policy)
-    print(f"config: {config}")
-
-    # FIXME
+    policy.input_features = input_features
+    policy.output_features = output_features
     policy.to("cuda")
 
-    return policy, input_features, output_features
-
-
-class ProcessorConfigKwargs(TypedDict, total=False):
-    """
-    A TypedDict defining the keyword arguments for processor configuration.
-
-    This provides type hints for the optional arguments passed to `make_pre_post_processors`,
-    improving code clarity and enabling static analysis.
-
-    Attributes:
-        preprocessor_config_filename: The filename for the preprocessor configuration.
-        postprocessor_config_filename: The filename for the postprocessor configuration.
-        preprocessor_overrides: A dictionary of overrides for the preprocessor configuration.
-        postprocessor_overrides: A dictionary of overrides for the postprocessor configuration.
-        dataset_stats: Dataset statistics for normalization.
-    """
-
-    preprocessor_config_filename: str | None
-    postprocessor_config_filename: str | None
-    preprocessor_overrides: dict[str, Any] | None
-    postprocessor_overrides: dict[str, Any] | None
-    dataset_stats: dict[str, dict[str, torch.Tensor]] | None
+    return policy
 
 
 def make_preprocessor_from_config(
@@ -794,59 +398,6 @@ def make_preprocessor_from_config(
     )
 
 
-def make_pre_post_processors(
-    pretrained_path: str | None = None,
-    **kwargs: Unpack[ProcessorConfigKwargs],
-) -> tuple[
-    PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
-    PolicyProcessorPipeline[PolicyAction, PolicyAction],
-]:
-    """
-    Create or load pre- and post-processor pipelines for a given policy.
-
-    This function acts as a factory. It can either load existing processor pipelines
-    from a pretrained path or create new ones from scratch based on the policy
-    configuration. Each policy type has a dedicated factory function for its
-    processors (e.g., `make_tdmpc_pre_post_processors`).
-
-    Args:
-        policy_cfg: The configuration of the policy for which to create processors.
-        pretrained_path: An optional path to load pretrained processor pipelines from.
-            If provided, pipelines are loaded from this path.
-        **kwargs: Keyword arguments for processor configuration, as defined in
-            `ProcessorConfigKwargs`.
-
-    Returns:
-        A tuple containing the input (pre-processor) and output (post-processor) pipelines.
-
-    Raises:
-        NotImplementedError: If a processor factory is not implemented for the given
-            policy configuration type.
-    """
-    return (
-        PolicyProcessorPipeline.from_pretrained(
-            pretrained_model_name_or_path=pretrained_path,
-            config_filename=kwargs.get(
-                "preprocessor_config_filename",
-                f"{POLICY_PREPROCESSOR_DEFAULT_NAME}.json",
-            ),
-            overrides=kwargs.get("preprocessor_overrides", {}),
-            to_transition=batch_to_transition,
-            to_output=transition_to_batch,
-        ),
-        PolicyProcessorPipeline.from_pretrained(
-            pretrained_model_name_or_path=pretrained_path,
-            config_filename=kwargs.get(
-                "postprocessor_config_filename",
-                f"{POLICY_POSTPROCESSOR_DEFAULT_NAME}.json",
-            ),
-            overrides=kwargs.get("postprocessor_overrides", {}),
-            to_transition=policy_action_to_transition,
-            to_output=transition_to_policy_action,
-        ),
-    )
-
-
 def has_method(cls: object, method_name: str) -> bool:
     return hasattr(cls, method_name) and callable(getattr(cls, method_name))
 
@@ -860,268 +411,177 @@ def update_policy(
     grad_clip_norm: float,
     lr_scheduler=None,
     lock=None,
-) -> tuple[MetricsTracker, dict]:
+) -> MetricsTracker:
     """
     Performs a single training step to update the policy's weights.
 
     This function executes the forward and backward passes, clips gradients, and steps the optimizer and
-    learning rate scheduler. Uses accelerate for distributed training (matching starVLA).
+    learning rate scheduler.
 
     Args:
         train_metrics: A MetricsTracker instance to record training statistics.
-        policy: The policy model to be trained (wrapped by accelerator).
+        policy: The policy model to be trained (FSDP2-sharded).
         batch: A batch of training data.
         optimizer: The optimizer used to update the policy's parameters.
+        use_amp: Whether to use automatic mixed precision.
         grad_clip_norm: The maximum norm for gradient clipping.
         lr_scheduler: An optional learning rate scheduler.
         lock: An optional lock for thread-safe optimizer updates.
 
     Returns:
-        A tuple containing:
-        - The updated MetricsTracker with new statistics for this step.
-        - A dictionary of outputs from the policy's forward pass, for logging purposes.
+        The updated MetricsTracker with new statistics for this step.
     """
     start_time = time.perf_counter()
 
-    # Get the policy model (unwrap accelerator if needed) to access config
-    policy_model = accelerator.unwrap_model(policy)
+    optimizer.zero_grad()
 
-    print(f"use_amp: {use_amp}")
+    autocast_context = (
+        torch.amp.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
+    )
+    with autocast_context:
+        output = policy(batch)
+        loss = output["loss"]
 
-    # Use accelerator.accumulate for gradient accumulation support (matching starVLA)
-    with accelerator.accumulate(policy):
-        optimizer.zero_grad()
+    loss.backward()
 
-        autocast_context = (
-            torch.amp.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
-        )
+    # Clip gradients (torch.nn.utils.clip_grad_norm_ works with DTensors in PyTorch ≥2.6)
+    grad_norm = torch.nn.utils.clip_grad_norm_(
+        policy.parameters(), grad_clip_norm if grad_clip_norm > 0 else float("inf")
+    )
 
-        with autocast_context:
-            loss = policy.forward(batch)
+    with lock if lock is not None else nullcontext():
+        optimizer.step()
 
-        # Use accelerator.backward instead of loss.backward() (matching starVLA)
-        accelerator.backward(loss)
-
-        # Clip gradients using accelerator (matching starVLA)
-        grad_norm = None
-        if grad_clip_norm > 0:
-            grad_norm = accelerator.clip_grad_norm_(policy.parameters(), grad_clip_norm)
-        else:
-            # Compute grad norm even if not clipping
-            grad_norm = accelerator.clip_grad_norm_(policy.parameters(), float("inf"))
-
-        with lock if lock is not None else nullcontext():
-            optimizer.step()
-
-        # Step through pytorch scheduler at every batch instead of epoch
-        if lr_scheduler is not None:
-            lr_scheduler.step()
+    # Step through pytorch scheduler at every batch instead of epoch
+    if lr_scheduler is not None:
+        lr_scheduler.step()
 
     # Update internal buffers if policy has update method
-    if has_method(policy_model, "update"):
-        policy_model.update()
+    if has_method(policy, "update"):
+        policy.update()
 
     train_metrics.loss = loss.item()
-    train_metrics.grad_norm = grad_norm
-    # train_metrics.grad_norm = grad_norm.item() if grad_norm is not None else 0.0
+    train_metrics.grad_norm = grad_norm.full_tensor().item() if hasattr(grad_norm, 'full_tensor') else grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
 
     return train_metrics
 
 
-# Commented out: old update_policy using manual DDP
-# def update_policy_old(
-#     train_metrics: MetricsTracker,
-#     policy,
-#     batch: Any,
-#     optimizer: Optimizer,
-#     use_amp: bool,
-#     grad_clip_norm: float,
-#     lr_scheduler=None,
-#     lock=None,
-# ) -> tuple[MetricsTracker, dict]:
-#     start_time = time.perf_counter()
-#     policy_model = policy.module if isinstance(policy, DDP) else policy
-#     print(f"use_amp: {use_amp}")
-#     autocast_context = (
-#         torch.amp.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
-#     )
-#     with autocast_context:
-#         loss = policy.forward(batch)
-#     loss.backward()
-#     if grad_clip_norm > 0:
-#         grad_norm = torch.nn.utils.clip_grad_norm_(
-#             policy.module.parameters() if isinstance(policy, DDP) else policy.parameters(),
-#             grad_clip_norm,
-#         )
-#     else:
-#         grad_norm = torch.nn.utils.clip_grad_norm_(
-#             policy.module.parameters() if isinstance(policy, DDP) else policy.parameters(),
-#             float("inf"),
-#             error_if_nonfinite=False,
-#         )
-#     with lock if lock is not None else nullcontext():
-#         optimizer.step()
-#     optimizer.zero_grad()
-#     if lr_scheduler is not None:
-#         lr_scheduler.step()
-#     if has_method(policy_model, "update"):
-#         policy_model.update()
-#     train_metrics.loss = loss.item()
-#     train_metrics.grad_norm = grad_norm.item()
-#     train_metrics.lr = optimizer.param_groups[0]["lr"]
-#     train_metrics.update_s = time.perf_counter() - start_time
-#     return train_metrics
-
-
 def main(config: TrainConfig, seed: int):
-
-    # import debugpy
-    # debugpy.listen(("0.0.0.0", 9096))
-    # debugpy.wait_for_client()
-    # debugpy.breakpoint()
-
     set_seed(seed)
-    print(
-        f"[DEBUG RNG main] After set_seed: torch state[:10] = {torch.get_rng_state()[:10].tolist()}"
-    )
 
-    # Use accelerator instead of manual DDP (matching starVLA)
-    device = accelerator.device
-    is_main_process = accelerator.is_main_process
-    accelerator.print(accelerator.state)
-    print(
-        f"[DEBUG RNG main] After accelerator setup: torch state[:10] = {torch.get_rng_state()[:10].tolist()}"
-    )
+    # --- Distributed init ---
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    is_main_process = rank == 0
 
-    # Commented out: old manual DDP initialization
-    # local_rank = init_ddp()
-    # device = torch.device("cuda", local_rank)
-    # rank = dist.get_rank()
-    # is_main_process = rank == 0 and local_rank == 0
-    # print(f"[DEBUG RNG main] After init_ddp: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
+    if config.data.dataset_type == "wds":
+        from megatron.energon import get_train_dataset, get_loader, WorkerConfig
+        from flagscale.models.vla.qwen_gr00t_task_encoder import TaskEncoder
 
-    dataset = make_dataset(config.data)
-    print(
-        f"[DEBUG RNG main] After make_dataset: torch state[:10] = {torch.get_rng_state()[:10].tolist()}"
-    )
+        policy = QwenGr00t(config=config)
+        policy.to("cuda")
 
-    accelerator.wait_for_everyone()  # Use accelerator instead of dist.barrier()
-
-    # Reset seed before model creation to match starVLA initialization order
-    # (starVLA creates model before dataset, so we reset seed to get same weights)
-    # set_seed(seed)
-    # print(f"[DEBUG RNG main] After 2nd set_seed: torch state[:10] = {torch.get_rng_state()[:10].tolist()}")
-
-    policy, input_features, output_features = make_policy(config=config, ds_meta=dataset.meta)
-    # register_debug_hooks(policy)
-
-    accelerator.wait_for_everyone()  # Use accelerator instead of dist.barrier()
-
-    # Create processors - only provide dataset_stats if not resuming from saved processors
-    processor_kwargs = {}
-    postprocessor_kwargs = {}
-    # Only provide dataset_stats when not resuming from saved processor state
-    processor_kwargs["dataset_stats"] = dataset.meta.stats
-
-    # Prepare overrides for preprocessor steps
-    preprocessor_overrides = {
-        "device_processor": {"device": device.type},
-        "normalizer_processor": {
-            "stats": dataset.meta.stats,
-            "features": {
-                **input_features,
-                **output_features,
-            },
-        },
-        # "tokenizer_processor": {"tokenizer_name": config.model.tokenizer_path},
-    }
-
-    # Read dataloader workers from config instead of hard-coding 0.
-    num_workers = int(getattr(config.system, "num_workers", 0))
-    shuffle = config.system.shuffle
-
-    # # Wrap dataset with StarVLAFormatDataset for starVLA-compatible output format
-    # image_keys = getattr(config.data, "image_keys", None) or [
-    #     "observation.images.image",
-    #     "observation.images.wrist_image",
-    # ]
-    # starvla_dataset = StarVLAFormatDataset(
-    #     dataset,
-    #     image_keys=image_keys,
-    #     image_size=(224, 224),
-    # )
-
-    # DistributedSampler ensures each rank gets different data
-    # Use accelerator's process info (matching starVLA pattern)
-    sampler = torch.utils.data.distributed.DistributedSampler(
-        dataset,
-        # starvla_dataset,
-        num_replicas=accelerator.num_processes,
-        rank=accelerator.process_index,
-        shuffle=shuffle,
-        drop_last=False,
-    )
-
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        # starvla_dataset,
-        num_workers=num_workers,
-        batch_size=config.system.batch_size,
-        shuffle=False,  # Must be False when using sampler
-        sampler=sampler,
-        pin_memory=True,
-        drop_last=False,
-        prefetch_factor=2 if num_workers > 0 else None,
-        # collate_fn=collate_fn_starvla,  # Return batch as list of dicts (starVLA style)
-    )
-
-    # Setup preprocessor
-    preprocessor = None
-    if config.data.preprocessor is not None:
-        preprocessor = make_preprocessor_from_config(
-            config.data.preprocessor, overrides=preprocessor_overrides
+        ds = get_train_dataset(
+            config.data.data_path,
+            batch_size=config.system.batch_size,
+            task_encoder=TaskEncoder(config.data.wds),
+            shuffle_buffer_size=1000,
+            max_samples_per_sequence=100,
+            worker_config=WorkerConfig.default_worker_config(num_workers=1, data_parallel_group=None),
+            repeat=True,
         )
+        dataloader = get_loader(ds)
+        dl_iter = iter(dataloader)
+        preprocessor = None
+        postprocessor = None
+        sampler = None
+        # Only to make the `MetricsTracker` work for now
+        num_frames = 1
+        num_episodes = 1
+    else:
+        dataset = make_dataset(config.data)
+        dist.barrier()
 
-    # Setup postprocessor (unnormalization for inference)
-    postprocessor = None
-    postprocessor_config = getattr(config.data, "postprocessor", None)
-    if postprocessor_config is not None:
-        postprocessor_overrides = {
-            "unnormalizer_processor": {
+        policy = make_policy(config=config, ds_meta=dataset.meta)
+        dist.barrier()
+
+        # Create processors - only provide dataset_stats if not resuming from saved processors
+        preprocessor_overrides = {
+            "device_processor": {"device": device.type},
+            "normalizer_processor": {
                 "stats": dataset.meta.stats,
                 "features": {
-                    **input_features,
-                    **output_features,
+                    **policy.input_features,
+                    **policy.output_features,
                 },
             },
         }
-        postprocessor = make_preprocessor_from_config(
-            postprocessor_config, overrides=postprocessor_overrides
+
+        num_workers = 0  # config.system.num_workers
+        shuffle = config.system.shuffle
+
+        # DistributedSampler ensures each rank gets different data
+        sampler = torch.utils.data.distributed.DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=shuffle,
+            drop_last=False,
         )
 
-    # Setup optimizer and scheduler (applies freeze config before accelerator.prepare)
+        dataloader = torch.utils.data.DataLoader(
+            dataset,
+            num_workers=num_workers,
+            batch_size=config.system.batch_size,
+            shuffle=False,  # Must be False when using sampler
+            sampler=sampler,
+            pin_memory=True,
+            drop_last=False,
+            prefetch_factor=2 if num_workers > 0 else None,
+        )
+
+        # Setup preprocessor
+        preprocessor = None
+        if config.data.preprocessor is not None:
+            preprocessor = make_preprocessor_from_config(
+                config.data.preprocessor, overrides=preprocessor_overrides
+            )
+
+        # Setup postprocessor (unnormalization for inference)
+        postprocessor = None
+        postprocessor_config = getattr(config.data, "postprocessor", None)
+        if postprocessor_config is not None:
+            postprocessor_overrides = {
+                "unnormalizer_processor": {
+                    "stats": dataset.meta.stats,
+                    "features": {
+                        **policy.input_features,
+                        **policy.output_features,
+                    },
+                },
+            }
+            postprocessor = make_preprocessor_from_config(
+                postprocessor_config, overrides=postprocessor_overrides
+            )
+
+        dl_iter = cycle(dataloader)
+        num_frames = dataset.num_frames
+        num_episodes = dataset.num_episodes
+
+    # --- Apply FSDP2 ---
+    device_mesh = init_device_mesh("cuda", (world_size,))
+    apply_fsdp2(policy, device_mesh)
+
+    # Setup optimizer and scheduler (applies freeze config internally)
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(policy, config)
 
-    # Use accelerator.prepare instead of manual DDP wrapping (matching starVLA)
-    # This handles DDP wrapping, moving to device, etc.
-    accelerator.dataloader_config.dispatch_batches = False  # Match starVLA setting
-    policy, optimizer, dataloader = accelerator.prepare(policy, optimizer, dataloader)
-
-    # Commented out: old manual DDP wrapping
-    # policy = DDP(
-    #     policy,
-    #     device_ids=[local_rank],
-    #     find_unused_parameters=True,
-    #     output_device=local_rank,
-    # )
-
-    accelerator.wait_for_everyone()  # Use accelerator instead of dist.barrier()
-
-    dl_iter = cycle(dataloader)
-
-    # Ensure training path is enabled after from_pretrained().
+    dist.barrier()
     policy.train()
 
     train_metrics = {
@@ -1132,37 +592,39 @@ def main(config: TrainConfig, seed: int):
         "dataloading_s": AverageMeter("data_s", ":.3f"),
     }
 
-    # Use accelerator.num_processes instead of dist.get_world_size()
-    effective_batch_size = config.system.batch_size * accelerator.num_processes
+    effective_batch_size = config.system.batch_size * world_size
 
     step = 0
 
     train_tracker = MetricsTracker(
         effective_batch_size,
-        dataset.num_frames,
-        dataset.num_episodes,
+        num_frames,
+        num_episodes,
         train_metrics,
         initial_step=step,
     )
 
-    # To ensures proper data shuffling across epochs in distributed training
+    # Ensures proper data shuffling across epochs in distributed training
     epoch = 0
-    samples_per_epoch = len(dataset) // effective_batch_size
-    sampler.set_epoch(epoch)
+    if sampler is not None:
+        samples_per_epoch = num_frames // effective_batch_size
+        sampler.set_epoch(epoch)
+    else:
+        samples_per_epoch = 0
 
     for _ in range(step, config.system.train_steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
-        batch = {
-            k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
+        if isinstance(batch, dict):  # lerobot: move batched tensors to device
+            batch = {
+                k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+                for k, v in batch.items()
+            }
 
         if preprocessor is not None:
             batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
-        st = time.perf_counter()
         train_tracker = update_policy(
             train_tracker,
             policy,
@@ -1172,19 +634,17 @@ def main(config: TrainConfig, seed: int):
             grad_clip_norm=config.system.grad_clip_norm,
             lr_scheduler=lr_scheduler,
         )
-        print(f"update_policy time: {time.perf_counter() - st}")
-        print(f"train_tracker at step {step}: {format_train_tracker_step(train_tracker)}")
 
         step += 1
         train_tracker.step()
 
         # Update epoch counter for sampler.set_epoch() when we've processed one epoch worth of samples
         # This ensures proper data shuffling across epochs in distributed training
-        if samples_per_epoch > 0 and step % samples_per_epoch == 0:
+        if sampler is not None and samples_per_epoch > 0 and step % samples_per_epoch == 0:
             epoch += 1
             sampler.set_epoch(epoch)
 
-        if step % config.system.log_freq == 0 and is_main_process:
+        if step % config.system.log_freq == 0:
             logger.info(f"step: {step} {format_train_tracker_step(train_tracker)}")
             train_tracker.reset_averages()
 
@@ -1192,38 +652,40 @@ def main(config: TrainConfig, seed: int):
             config.system.checkpoint.save_checkpoint
             and step % config.system.checkpoint.save_freq == 0
         ):
-            # Synchronize all processes before checkpoint saving
-            accelerator.wait_for_everyone()
+            dist.barrier()
+
+            # get_model_state_dict is a collective — all ranks must call it
+            options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+            state_dict = get_model_state_dict(policy, options=options)
 
             if is_main_process:
-                from pathlib import Path
-
                 logger.info(f"Saving checkpoint at step {step}")
                 output_dir = Path(config.system.checkpoint.output_directory)
                 checkpoint_dir = get_step_checkpoint_dir(
                     output_dir, config.system.train_steps, step
                 )
-                # Use accelerator.unwrap_model instead of policy.module
-                policy_to_save = accelerator.unwrap_model(policy)
-                save_checkpoint(
+                pretrained_dir = checkpoint_dir / PRETRAINED_MODEL_DIR
+                policy.save_pretrained_artifacts(pretrained_dir)
+                ckpt_config = OmegaConf.merge(
+                    config.to_omegaconf(),
+                    policy.checkpoint_config_overrides(),
+                )
+                save_vla_checkpoint(
                     checkpoint_dir=checkpoint_dir,
-                    policy=policy_to_save,
-                    config=config,
+                    model_or_state_dict=state_dict,
+                    config=ckpt_config,
                     preprocessor=preprocessor,
                     postprocessor=postprocessor,
                 )
                 update_last_checkpoint(checkpoint_dir)
 
-            # Synchronize all processes after checkpoint saving
-            accelerator.wait_for_everyone()
+            dist.barrier()
 
     if is_main_process:
         logger.info("Training completed")
 
-    # Properly clean up using accelerator (matching starVLA)
-    accelerator.wait_for_everyone()
-    # Note: accelerator handles process group cleanup automatically
-    # dist.destroy_process_group()  # Commented out: handled by accelerator
+    dist.barrier()
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":

@@ -19,8 +19,10 @@ from flagscale.runner.utils import (
     get_free_port,
     get_nnodes,
     get_nproc_per_node,
+    get_pkg_dir,
     logger,
     parse_hostfile,
+    resolve_path,
     run_local_command,
     run_scp_command,
     run_ssh_command,
@@ -73,7 +75,7 @@ def _get_runner_cmd_train(
 
     rdzv_id = runner_config.get("rdzv_id", "default")
     log_dir = runner_config.get("log_dir", logging_config.details_dir)
-    log_dir = os.path.abspath(log_dir)
+    log_dir = resolve_path(log_dir, "runner.log_dir")
     no_shared_fs = runner_config.get("no_shared_fs", False)
     if no_shared_fs:
         log_dir = os.path.join(log_dir, "host")
@@ -104,6 +106,8 @@ def _get_runner_cmd_train(
         del runner_args["enable_monitoring"]
     if "enable_gpu_health_check" in runner_args:
         del runner_args["enable_gpu_health_check"]
+    if "deploy" in runner_args:
+        del runner_args["deploy"]
     runner_args["rdzv_id"] = rdzv_id
     # runner_args["master_addr"] = master_addr
     # runner_args["master_port"] = master_port
@@ -180,10 +184,7 @@ class SshLauncher(LauncherBase):
         self.user_envs = self.backend.user_envs
         self.user_script = self.backend.user_script
         self.gpu_health_check_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            "runner",
-            "elastic",
-            "gpu_health_check.py",
+            get_pkg_dir(), "flagscale", "runner", "elastic", "gpu_health_check.py"
         )
 
     def _run_each(
@@ -232,9 +233,7 @@ class SshLauncher(LauncherBase):
         elif self.task_type == "rl":
             ray_cmd = []
             if self.resources is not None:
-                runtime_env = self.config.experiment.runner.get(
-                    "runtime_env", "third_party/verl/verl/trainer/runtime_env.yaml"
-                )
+                runtime_env = self.config.experiment.runner.get("runtime_env", None)
                 ray_dashboard_port = self.config.experiment.runner.get("ray_dashboard_port", 8265)
                 ray_cmd = [
                     "ray",
@@ -270,7 +269,7 @@ class SshLauncher(LauncherBase):
                 cmd,
                 background=True,
                 with_test=with_test,
-                root_dir=node_specific_config.get("build_dir", None),
+                pkg_dir=node_specific_config.get("build_dir", None),
                 enable_monitoring=enable_monitoring,
             )
         elif self.task_type == "rl":
@@ -844,8 +843,11 @@ class SshLauncher(LauncherBase):
         # Build command
         if nnodes > 1 or nproc_per_node > 1:
             # Use torchrun for distributed health check
+            import shutil
+
+            TORCHRUN = shutil.which("torchrun")
             cmd = [
-                "torchrun",
+                TORCHRUN,
                 f"--nnodes={nnodes}",
                 f"--nproc_per_node={nproc_per_node}",
                 f"--node_rank={node_rank}",  # Use the correct node rank for this node
@@ -885,7 +887,7 @@ class SshLauncher(LauncherBase):
 
             try:
                 # Waiting for the health check to complete and get the actual return code
-                result = run_ssh_command(host, cmd_str, ssh_port, query=True)
+                result = run_ssh_command(host, cmd_str, ssh_port, query=True, background=False)
                 success = result.returncode == 0 if hasattr(result, "returncode") else False
                 if not success:
                     logger.error(

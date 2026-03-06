@@ -1,23 +1,34 @@
-"""Optimizer setup utilities: parameter freezing and per-module optimizer config.
+"""Optimizer setup utilities.
 
 Supports:
 - Freezing parameters via regex patterns
 - Per-module optimizer settings (lr, weight_decay, betas, etc.) via config
+- LR scheduler via transformers.get_scheduler
 
 Example config (YAML):
     model:
-      freeze:
-        freeze_patterns: ["backbone.*"]
-    system:
       optimizer:
-        lr: 1e-4
-        weight_decay: 0.01
+        name: AdamW
+        lr: 2.5e-5
+        betas: [0.9, 0.95]
+        eps: 1.0e-08
+        weight_decay: 1.0e-08
         param_groups:
-          qwen_backbone:
-            lr: 1e-5
-          action_head:
-            lr: 2e-4
-            weight_decay: 0.0
+          vlm:
+            lr: 1.0e-05
+          action_model:
+            lr: 1.0e-04
+        scheduler:
+          name: cosine_with_min_lr
+          warmup_steps: 5000
+          scheduler_kwargs:
+            min_lr: 1.0e-06
+
+      freeze:
+        freeze_patterns:
+          - "qwen_vl_interface\\..*"
+        keep_patterns:
+          - "qwen_vl_interface\\.model\\.visual\\.merger\\..*"
 """
 
 import re
@@ -29,7 +40,7 @@ import torch
 import torch.nn as nn
 from transformers import get_scheduler
 
-from flagscale.runner.utils import logger
+from flagscale.logger import logger
 
 if TYPE_CHECKING:
     from flagscale.train.train_config import (
@@ -79,6 +90,7 @@ def freeze_and_get_trainable_params(
     keep_matcher = PatternMatcher(keep_patterns or [])
 
     trainable_count, frozen_count = 0, 0
+    previously_frozen_now_trainable = []
 
     for name, param in named_parameters:
         should_freeze = freeze_matcher.matches(name) and not keep_matcher.matches(name)
@@ -87,9 +99,17 @@ def freeze_and_get_trainable_params(
             param.requires_grad = False
             frozen_count += param.numel()
         else:
-            param.requires_grad = True
-            trainable_count += param.numel()
-            yield param
+            # Only force parameters to be trainable if freeze patterns are provided.
+            # Otherwise, preserve the original requires_grad state.
+            if freeze_patterns:
+                if not param.requires_grad:
+                    previously_frozen_now_trainable.append(name)
+                param.requires_grad = True
+            if param.requires_grad:
+                trainable_count += param.numel()
+                yield param
+            else:
+                frozen_count += param.numel()
 
     # Log summary
     total = trainable_count + frozen_count
@@ -98,6 +118,15 @@ def freeze_and_get_trainable_params(
         f"Parameters: trainable={trainable_count:,} ({pct:.2%}) | "
         f"frozen={frozen_count:,} | total={total:,}"
     )
+
+    if previously_frozen_now_trainable:
+        logger.warning(
+            f"{len(previously_frozen_now_trainable)} parameter(s) were already frozen "
+            f"(requires_grad=False) but don't match any freeze pattern and are being "
+            f"made trainable. Add them to freeze_patterns if they should stay frozen:"
+        )
+        for name in previously_frozen_now_trainable:
+            logger.warning(f"  unfrozen: {name}")
 
     # Warn about unused patterns
     unused_freeze = freeze_matcher.get_unused_patterns()
@@ -194,18 +223,42 @@ def build_optim_param_groups(
         try:
             module = model.get_submodule(module_name)
         except AttributeError:
-            # TODO: (yupu) logger can't print the current module name and line number
             logger.warning(
                 f"build_optim_param_groups: Module '{module_name}' not found in model, skipping."
             )
             continue
 
-        params = [p for p in module.parameters() if p.requires_grad]
-        if not params:
+        # All trainable params for this module (including descendants)
+        module_params = [p for p in module.parameters() if p.requires_grad]
+        if not module_params:
             logger.warning(
                 f"build_optim_param_groups: Module '{module_name}' has no trainable parameters."
             )
             continue
+        # Avoid assigning the same parameter to multiple param groups by
+        # filtering out parameters that are already used by previous groups.
+        params = [p for p in module_params if id(p) not in used_param_ids]
+        if not params:
+            # All trainable params for this module were already included in
+            # previous param groups. This usually indicates overlapping
+            # module paths in the optimizer config (e.g., both "encoder"
+            # and "encoder.layer1").
+            logger.warning(
+                "build_optim_param_groups: All trainable parameters for module "
+                f"'{module_name}' are already assigned to previous param groups. "
+                "This suggests overlapping module paths in the optimizer "
+                "configuration; this group will be skipped."
+            )
+            continue
+        if len(params) < len(module_params):
+            # Some, but not all, parameters were already assigned to previous
+            # groups. Warn the user so they are aware of the partial overlap.
+            logger.warning(
+                "build_optim_param_groups: Some trainable parameters for module "
+                f"'{module_name}' are already assigned to previous param groups "
+                "(overlapping module paths). Only unassigned parameters will be "
+                "included in this group."
+            )
 
         used_param_ids.update(id(p) for p in params)
         param_groups.append({"params": params, "name": module_name, **group_config})
@@ -230,7 +283,7 @@ def setup_optimizer(
     freeze_config: "FreezeConfig | None" = None,
 ) -> torch.optim.Optimizer:
     """
-    One-stop setup: apply freeze config, build param groups, create optimizer.
+    Setup optimizer.
 
     Args:
         model: The model to optimize.
@@ -245,6 +298,13 @@ def setup_optimizer(
         log_trainable_params(model)
 
     param_groups = build_optim_param_groups(model, optimizer_config.param_groups)
+    total_params = sum(len(g["params"]) for g in param_groups)
+    if not total_params:
+        raise ValueError(
+            "No trainable parameters found. All parameters may be frozen, "
+            "or configured param groups have no trainable parameters."
+        )
+
     optimizer_kwargs = {"params": param_groups, **optimizer_config.get_optimizer_kwargs()}
 
     # Get optimizer class by name
@@ -307,8 +367,8 @@ def setup_optimizer_and_scheduler(
 
     Args:
         model: The model to optimize.
-        train_config: TrainConfig containing system (optimizer, scheduler, train_steps)
-            and model (freeze config).
+        train_config: TrainConfig containing model (optimizer, scheduler, freeze config)
+            and system (train_steps).
 
     Returns:
         Tuple of (optimizer, lr_scheduler).
@@ -318,12 +378,12 @@ def setup_optimizer_and_scheduler(
     """
     optimizer = setup_optimizer(
         model,
-        train_config.system.optimizer,
+        train_config.model.optimizer,
         freeze_config=train_config.model.freeze,
     )
     scheduler = setup_scheduler(
         optimizer,
-        train_config.system.scheduler,
+        train_config.model.optimizer.scheduler,
         num_training_steps=train_config.system.train_steps,
     )
     return optimizer, scheduler

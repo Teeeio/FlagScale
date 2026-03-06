@@ -1063,7 +1063,6 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self._ensure_hf_dataset_loaded()
         item = self.hf_dataset[idx]
         ep_idx = item["episode_index"].item()
-        print(f"idx: {idx}, ep_idx: {ep_idx}")
 
         query_indices = None
         if self.delta_indices is not None:
@@ -1076,7 +1075,6 @@ class LeRobotDataset(torch.utils.data.Dataset):
         if len(self.meta.video_keys) > 0:
             current_ts = item["timestamp"].item()
             query_timestamps = self._get_query_timestamps(current_ts, query_indices)
-            print(f"query_timestamps: {query_timestamps}")
             video_frames = self._query_videos(query_timestamps, ep_idx)
             item = {**video_frames, **item}
 
@@ -1089,14 +1087,6 @@ class LeRobotDataset(torch.utils.data.Dataset):
         task_idx = item["task_index"].item()
         item["task"] = self.meta.tasks.iloc[task_idx].name
 
-        # DEBUG: print raw action from dataset
-        if "action" in item:
-            action_val = item["action"]
-            if hasattr(action_val, "numpy"):
-                action_val = action_val.numpy()
-            print(
-                f"[FS dataset] action[0,:5]: {action_val[0, :5].tolist() if len(action_val.shape) > 1 else action_val[:5].tolist()}"
-            )
         return item
 
     def __repr__(self):

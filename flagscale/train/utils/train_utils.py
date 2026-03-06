@@ -20,6 +20,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from safetensors.torch import load_model, save_file
 
+from flagscale.logger import logger
 from flagscale.models.utils.constants import (
     CHECKPOINTS_DIR,
     LAST_CHECKPOINT_LINK,
@@ -27,8 +28,6 @@ from flagscale.models.utils.constants import (
     TRAINING_STEP,
 )
 from flagscale.train.datasets.utils import load_json, write_json
-
-# from lerobot.utils.random_utils import load_rng_state, save_rng_state
 
 
 def get_step_identifier(step: int, total_steps: int) -> str:
@@ -59,9 +58,30 @@ def update_last_checkpoint(checkpoint_dir: Path) -> Path:
     last_checkpoint_dir.symlink_to(relative_target)
 
 
-def save_checkpoint(
+def save_checkpoint(checkpoint_dir: Path, policy) -> None:
+    """This function creates the following directory structure:
+
+    005000/  #  training step at checkpoint
+    ├── pretrained_model/
+    │   ├── config.json  # policy config
+    │   ├── model.safetensors  # policy weights
+    │   ├── train_config.json  # train config
+    │   ├── processor.json  # processor config (if preprocessor provided)
+    │   └── step_*.safetensors  # processor state files (if any)
+    └── training_state/
+        ├── optimizer_param_groups.json  #  optimizer param groups
+        ├── optimizer_state.safetensors  # optimizer state
+        ├── rng_state.safetensors  # rng states
+        ├── scheduler_state.json  # scheduler state
+        └── training_step.json  # training step
+    """
+    pretrained_dir = checkpoint_dir / PRETRAINED_MODEL_DIR
+    policy.save_pretrained(pretrained_dir)
+
+
+def save_vla_checkpoint(
     checkpoint_dir: Path,
-    policy,
+    model_or_state_dict,
     config,
     preprocessor=None,
     postprocessor=None,
@@ -78,7 +98,7 @@ def save_checkpoint(
 
     Args:
         checkpoint_dir: Directory to save checkpoint (e.g., checkpoints/005000)
-        policy: The model
+        model_or_state_dict: nn.Module or a pre-gathered state_dict (e.g. from FSDP2)
         config: Training config (OmegaConf, Pydantic, or dict)
         preprocessor: Optional PolicyProcessorPipeline
     """
@@ -93,9 +113,13 @@ def save_checkpoint(
         config = OmegaConf.create(config)
     OmegaConf.save(config, pretrained_dir / "train_config.yaml")
 
-    # Save model weights. Clone tensors to avoid safetensors errors with
-    # non-contiguous views (e.g. from DeepSpeed-wrapped models).
-    state_dict = {k: v.clone().contiguous() for k, v in policy.state_dict().items()}
+    # Clone tensors to avoid safetensors errors with non-contiguous views.
+    if isinstance(model_or_state_dict, dict):
+        state_dict = {k: v.clone().contiguous() for k, v in model_or_state_dict.items()}
+    else:
+        state_dict = {
+            k: v.clone().contiguous() for k, v in model_or_state_dict.state_dict().items()
+        }
     save_file(state_dict, pretrained_dir / "model.safetensors")
 
     if preprocessor is not None:
@@ -125,7 +149,7 @@ def load_checkpoint(
     """
     from flagscale.train.processor import PolicyProcessorPipeline
 
-    print(f"Loading checkpoint from {checkpoint_dir}")
+    logger.info(f"Loading checkpoint from {checkpoint_dir}")
 
     if isinstance(checkpoint_dir, str):
         checkpoint_dir = Path(checkpoint_dir)
@@ -139,8 +163,16 @@ def load_checkpoint(
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
     config = OmegaConf.load(config_path)
+    # Set _pretrained_dir so OmegaConf resolves ${_pretrained_dir} interpolations
+    # (e.g., model.qwenvl.base_vlm saved as "${_pretrained_dir}/vlm_config")
+    OmegaConf.update(config, "_pretrained_dir", str(pretrained_dir))
 
     model = model_cls(config)
+
+    # Materialize any meta tensors (from torch.device("meta") init) before loading weights.
+    has_meta = any(p.is_meta for p in model.parameters())
+    if has_meta:
+        model.to_empty(device=device)
 
     weights_path = pretrained_dir / "model.safetensors"
     if not weights_path.exists():
@@ -148,23 +180,23 @@ def load_checkpoint(
     # strict=False to handle tied weights saved as separate entries
     missing_keys, unexpected_keys = load_model(model, weights_path, device=device, strict=False)
     if missing_keys:
-        print(f"Warning: Missing keys when loading checkpoint: {len(missing_keys)} keys")
+        logger.warning(f"Missing keys when loading checkpoint: {len(missing_keys)} keys")
         if len(missing_keys) <= 10:
             for key in missing_keys:
-                print(f"  - {key}")
+                logger.warning(f"  - {key}")
         else:
             for key in missing_keys[:10]:
-                print(f"  - {key}")
-            print(f"  ... and {len(missing_keys) - 10} more")
+                logger.warning(f"  - {key}")
+            logger.warning(f"  ... and {len(missing_keys) - 10} more")
     if unexpected_keys:
-        print(f"Warning: Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
+        logger.warning(f"Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
         if len(unexpected_keys) <= 10:
             for key in unexpected_keys:
-                print(f"  - {key}")
+                logger.warning(f"  - {key}")
         else:
             for key in unexpected_keys[:10]:
-                print(f"  - {key}")
-            print(f"  ... and {len(unexpected_keys) - 10} more")
+                logger.warning(f"  - {key}")
+            logger.warning(f"  ... and {len(unexpected_keys) - 10} more")
 
     model.to(device)
 
@@ -185,62 +217,3 @@ def load_checkpoint(
         )
 
     return model, preprocessor, postprocessor
-
-
-# def save_training_state(
-#     checkpoint_dir: Path,
-#     train_step: int,
-#     optimizer: Optimizer | None = None,
-#     scheduler: LRScheduler | None = None,
-# ) -> None:
-#     """
-#     Saves the training step, optimizer state, scheduler state, and rng state.
-
-#     Args:
-#         save_dir (Path): The directory to save artifacts to.
-#         train_step (int): Current training step.
-#         optimizer (Optimizer | None, optional): The optimizer from which to save the state_dict.
-#             Defaults to None.
-#         scheduler (LRScheduler | None, optional): The scheduler from which to save the state_dict.
-#             Defaults to None.
-#     """
-#     save_dir = checkpoint_dir / TRAINING_STATE_DIR
-#     save_dir.mkdir(parents=True, exist_ok=True)
-#     save_training_step(train_step, save_dir)
-#     save_rng_state(save_dir)
-#     if optimizer is not None:
-#         save_optimizer_state(optimizer, save_dir)
-#     if scheduler is not None:
-#         save_scheduler_state(scheduler, save_dir)
-
-
-# def load_training_state(
-#     checkpoint_dir: Path, optimizer: Optimizer, scheduler: LRScheduler | None
-# ) -> tuple[int, Optimizer, LRScheduler | None]:
-#     """
-#     Loads the training step, optimizer state, scheduler state, and rng state.
-#     This is used to resume a training run.
-
-#     Args:
-#         checkpoint_dir (Path): The checkpoint directory. Should contain a 'training_state' dir.
-#         optimizer (Optimizer): The optimizer to load the state_dict to.
-#         scheduler (LRScheduler | None): The scheduler to load the state_dict to (can be None).
-
-#     Raises:
-#         NotADirectoryError: If 'checkpoint_dir' doesn't contain a 'training_state' dir
-
-#     Returns:
-#         tuple[int, Optimizer, LRScheduler | None]: training step, optimizer and scheduler with their
-#             state_dict loaded.
-#     """
-#     training_state_dir = checkpoint_dir / TRAINING_STATE_DIR
-#     if not training_state_dir.is_dir():
-#         raise NotADirectoryError(training_state_dir)
-
-#     load_rng_state(training_state_dir)
-#     step = load_training_step(training_state_dir)
-#     optimizer = load_optimizer_state(optimizer, training_state_dir)
-#     if scheduler is not None:
-#         scheduler = load_scheduler_state(scheduler, training_state_dir)
-
-#     return step, optimizer, scheduler

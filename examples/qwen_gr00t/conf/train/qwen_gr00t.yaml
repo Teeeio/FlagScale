@@ -7,52 +7,30 @@ system:
   shuffle: true
   num_workers: 4
 
-  optimizer:
-    name: AdamW
-    lr: 2.5e-5
-    betas: [0.9, 0.95]
-    eps: 1.0e-08
-    weight_decay: 1.0e-08
-    param_groups:
-      vlm:
-        lr: 1.0e-05
-      action_model:
-        lr: 1.0e-04
-
-  scheduler:
-    name: cosine_with_min_lr
-    warmup_steps: 5000
-    scheduler_kwargs:
-      min_lr: 1.0e-06
-    # Legacy fields kept for BC
-    decay_steps: 30000
-    decay_lr: 2.5e-6
-
   checkpoint:
     output_directory: ${experiment.exp_dir}
     # Whether to save checkpoint
     save_checkpoint: true
     # Number of steps between checkpoints
-    save_freq: 10000
+    save_freq: 1000
   # TODO(yupu): Support resuming from checkpoint
 
 model:
   # TODO: (yupu) the config layout is still a mess
   model_name: qwen_gr00t
   # Path to the checkpoint of the pretrained base VLM model, e.g. Qwen3-VL-4B-Instruct
-  checkpoint_dir: /share/project/fengyupu/models/Qwen/Qwen3-VL-4B-Instruct/
-  # checkpoint_dir: /workspace/models/Qwen/Qwen2.5-VL-3B-Instruct/
+  checkpoint_dir: /workspace/models/Qwen/Qwen3-VL-4B-Instruct/
   vlm:
     type: qwen3-vl
-    # type: qwen2.5-vl
   qwenvl:
-    base_vlm: /share/project/fengyupu/models/Qwen/Qwen3-VL-4B-Instruct/
-    # base_vlm: /workspace/models/Qwen/Qwen2.5-VL-3B-Instruct/
+    base_vlm: /workspace/models/Qwen/Qwen3-VL-4B-Instruct/
     attn_implementation: flash_attention_2
     vl_hidden_dim: 2048
   dino:
     dino_backbone: dinov2_vits14
   action_model:
+    # Whether to condition the action model on proprioceptive state (observation.state)
+    use_state: false
     type: flow_matching
     action_model_type: DiT-B
     action_hidden_dim: 1024
@@ -75,15 +53,32 @@ model:
       cross_attention_dim: 2048
       dropout: 0.2
       final_dropout: True
-      # # FIXME: Debug only
-      # dropout: 0
-      # final_dropout: False
       interleave_self_attention: True
       norm_type: ada_norm
       num_layers: 16
       output_dim: 1024
       positional_embeddings: None
   reduce_in_full_precision: True
+
+  optimizer:
+    name: AdamW
+    lr: 2.5e-5
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-08
+    param_groups:
+      vlm:
+        lr: 1.0e-05
+      action_model:
+        lr: 1.0e-04
+    scheduler:
+      name: cosine_with_min_lr
+      warmup_steps: 5000
+      scheduler_kwargs:
+        min_lr: 1.0e-06
+      # Legacy fields kept for BC
+      decay_steps: 30000
+      decay_lr: 2.5e-6
 
   # ============================================================
   # Module Freezing Configuration
@@ -117,6 +112,11 @@ model:
   #   #   - "action_model\\.action_decoder\\..*"
 
 data:
+  dataset_type: lerobot
+  wds:
+    vision_root: ""
+    action_key: eepose
+    state_key: eepose
   # TODO: (yupu) Remove this once we have a proper dataset config
   vla_data:
     dataset_py: lerobot_datasets
@@ -130,16 +130,8 @@ data:
     obs: ["image_0"]
     video_backend: torchvision_av
   # Path to the training data
-  data_path: /share/project/fengyupu/datasets/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot/
+  data_path: /workspace/datasets/IPEC-COMMUNITY/libero_goal_no_noops_1.0.0_lerobot/
   tolerance_s: 0.0001
-  use_imagenet_stats: False
-  # To match the input features naming from the dataset to the policy config
-  # For example, for the aloha_mobile_cabinet dataset, the rename_map is:
-  rename_map:
-    observation.images.cam_high: observation.images.base_0_rgb
-    observation.images.cam_left_wrist: observation.images.left_wrist_0_rgb
-    observation.images.cam_right_wrist: observation.images.right_wrist_0_rgb
-  use_quantiles: false
   # TODO: (yupu) I think these indices should belong to the policy config, maybe put it in the model config?
   observation_delta_indices: [0]
   action_delta_indices: [0,1,2,3,4,5,6,7]
@@ -159,9 +151,6 @@ data:
         config:
           eps: 1e-8
           features: {}
-          # Only normalize first 6 action dims (x,y,z,roll,pitch,yaw).
-          # Gripper (dim 6) is left raw, matching starVLA's Libero4in1DataConfig.
-          # normalize_action_dims: 6
           norm_map:
             VISUAL: IDENTITY
             STATE: MIN_MAX
@@ -173,7 +162,6 @@ data:
         config:
           eps: 1e-8
           features: {}
-          # normalize_action_dims: 6
           norm_map:
             VISUAL: IDENTITY
             STATE: MIN_MAX

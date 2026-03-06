@@ -101,7 +101,6 @@ class _NormalizationMixin:
     dtype: torch.dtype | None = None
     eps: float = 1e-8
     normalize_observation_keys: set[str] | None = None
-    normalize_action_dims: int | None = None
 
     _tensor_stats: dict[str, dict[str, Tensor]] = field(
         default_factory=dict, init=False, repr=False
@@ -250,8 +249,6 @@ class _NormalizationMixin:
         }
         if self.normalize_observation_keys is not None:
             config["normalize_observation_keys"] = sorted(self.normalize_observation_keys)
-        if self.normalize_action_dims is not None:
-            config["normalize_action_dims"] = self.normalize_action_dims
         return config
 
     def _normalize_observation(
@@ -297,11 +294,6 @@ class _NormalizationMixin:
         processed_action = self._apply_transform(
             action, ACTION, FeatureType.ACTION, inverse=inverse
         )
-        if self.normalize_action_dims is not None:
-            d = self.normalize_action_dims
-            result = action.clone()
-            result[..., :d] = processed_action[..., :d]
-            return result
         return processed_action
 
     def _apply_transform(
