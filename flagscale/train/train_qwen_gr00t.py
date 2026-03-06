@@ -384,6 +384,7 @@ else:
 def make_dataset(cfg: DataConfig):
     # TODO: (yupu) Support image transforms
     enable_image_transform = False
+    # Respect config first, keep torchcodec as safe default.
     video_backend = (
         getattr(getattr(cfg, "vla_data", None), "video_backend", None)
         or getattr(cfg, "video_backend", None)
@@ -619,7 +620,7 @@ def make_policy(
     # kwargs["pretrained_name_or_path"] = cfg.pretrained_path
     # policy = policy_cls.from_pretrained(cfg.pretrained_path, config=cfg)
 
-    # Keep image order stable: prefer primary image first, wrist second.
+    # Keep visual key order deterministic across dataset/config variants.
     visual_keys = [key for key, ft in input_features.items() if ft.type is FeatureType.VISUAL]
     preferred_image_order = list(
         getattr(
@@ -1037,6 +1038,7 @@ def main(config: TrainConfig, seed: int):
         # "tokenizer_processor": {"tokenizer_name": config.model.tokenizer_path},
     }
 
+    # Read dataloader workers from config instead of hard-coding 0.
     num_workers = int(getattr(config.system, "num_workers", 0))
     shuffle = config.system.shuffle
 
@@ -1119,6 +1121,7 @@ def main(config: TrainConfig, seed: int):
 
     dl_iter = cycle(dataloader)
 
+    # Ensure training path is enabled after from_pretrained().
     policy.train()
 
     train_metrics = {

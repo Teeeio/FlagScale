@@ -135,6 +135,7 @@ class Qwen25VLBackbone(QwenVLBackbone):
         return image_keys
 
     def prepare_input(self, batch: dict) -> dict[str, torch.Tensor]:
+        # Centralize key resolution to support both old and new configs.
         image_keys = self._resolve_image_keys(batch)
         return self.build_qwenvl_inputs(examples=batch, image_keys=image_keys)
 
