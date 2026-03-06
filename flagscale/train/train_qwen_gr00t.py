@@ -384,12 +384,11 @@ else:
 def make_dataset(cfg: DataConfig):
     # TODO: (yupu) Support image transforms
     enable_image_transform = False
-    # TODO: (yupu) Remove hard-coded video backend
-    # After not much testing, It feels like that `torchcodec` is more robust than `pyav`
-    # `pyav` crashes sometimes
-    video_backend = "torchcodec"
-    # video_backend = "torchvision_av"
-    # video_backend = "pyav"
+    video_backend = (
+        getattr(getattr(cfg, "vla_data", None), "video_backend", None)
+        or getattr(cfg, "video_backend", None)
+        or "torchcodec"
+    )
 
     # image_transforms = ImageTransforms(cfg.image_transforms) if enable_image_transform else None
 
@@ -620,12 +619,18 @@ def make_policy(
     # kwargs["pretrained_name_or_path"] = cfg.pretrained_path
     # policy = policy_cls.from_pretrained(cfg.pretrained_path, config=cfg)
 
-    # TODO: (yupu) This is a hack, we should find a better way to handle this. LeRobot does this in the policy config.
-    # The order of the images is defined in the dataset config.json
-    image_features = {
-        key: ft for key, ft in input_features.items() if ft.type is FeatureType.VISUAL
-    }
-    config.data.vla_data.image_features = image_features
+    # Keep image order stable: prefer primary image first, wrist second.
+    visual_keys = [key for key, ft in input_features.items() if ft.type is FeatureType.VISUAL]
+    preferred_image_order = list(
+        getattr(
+            config.data,
+            "image_key_order",
+            ["observation.images.image", "observation.images.wrist_image"],
+        )
+    )
+    ordered_visual_keys = [key for key in preferred_image_order if key in visual_keys]
+    ordered_visual_keys.extend(key for key in visual_keys if key not in ordered_visual_keys)
+    config.data.vla_data.image_features = ordered_visual_keys
 
     policy = QwenGr00t(config=config)
     # policy = Qwen_PI(config=config)
@@ -1032,7 +1037,7 @@ def main(config: TrainConfig, seed: int):
         # "tokenizer_processor": {"tokenizer_name": config.model.tokenizer_path},
     }
 
-    num_workers = 0  # config.system.num_workers
+    num_workers = int(getattr(config.system, "num_workers", 0))
     shuffle = config.system.shuffle
 
     # # Wrap dataset with StarVLAFormatDataset for starVLA-compatible output format
@@ -1114,7 +1119,7 @@ def main(config: TrainConfig, seed: int):
 
     dl_iter = cycle(dataloader)
 
-    # policy.train()
+    policy.train()
 
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),

@@ -98,9 +98,44 @@ class Qwen25VLBackbone(QwenVLBackbone):
             torch_dtype="auto",
         )
 
+    def _resolve_image_keys(self, batch: dict) -> list[str]:
+        image_keys = None
+        vla_data_cfg = self._config.data.vla_data
+
+        # Backward-compatible path used by earlier train configs.
+        if "image_features" in vla_data_cfg and vla_data_cfg.image_features:
+            image_keys = list(vla_data_cfg.image_features)
+
+        # Fallback for configs that place ordering under data.image_key_order.
+        if (
+            not image_keys
+            and "image_key_order" in self._config.data
+            and self._config.data.image_key_order
+        ):
+            image_keys = list(self._config.data.image_key_order)
+
+        # Final fallback: infer from runtime batch payload.
+        if not image_keys:
+            preferred_keys = [
+                "observation.images.image",
+                "observation.images.wrist_image",
+                "observation.images.base_0_rgb",
+                "observation.images.left_wrist_0_rgb",
+                "observation.images.right_wrist_0_rgb",
+            ]
+            image_keys = [key for key in preferred_keys if key in batch]
+        if not image_keys:
+            image_keys = [key for key in batch.keys() if "image" in key]
+        if not image_keys:
+            raise KeyError(
+                "Cannot resolve image keys from config or batch. "
+                "Expected `data.vla_data.image_features`, `data.image_key_order`, or batch image keys."
+            )
+
+        return image_keys
+
     def prepare_input(self, batch: dict) -> dict[str, torch.Tensor]:
-        # TODO: (yupu) This is a hack, we should find a better way to handle this.
-        image_keys = self._config.data.vla_data.image_features
+        image_keys = self._resolve_image_keys(batch)
         return self.build_qwenvl_inputs(examples=batch, image_keys=image_keys)
 
     def build_qwenvl_inputs(
