@@ -42,6 +42,16 @@ from flagscale.train.utils.train_utils import (
 )
 from flagscale.train.utils.optim_setup import setup_optimizer_and_scheduler
 from flagscale.models.vla.qwen_gr00t import QwenGr00t
+from flagscale.models.vla.utils import order_visual_input_features
+
+
+DEFAULT_QWEN_GR00T_IMAGE_KEY_ORDER = [
+    "observation.images.image",
+    "observation.images.wrist_image",
+    "observation.images.base_0_rgb",
+    "observation.images.left_wrist_0_rgb",
+    "observation.images.right_wrist_0_rgb",
+]
 
 
 def set_seed(seed: int):
@@ -201,6 +211,13 @@ def make_policy(
         if ft.type == FeatureType.ACTION
     }
     input_features = {key: ft for key, ft in features.items() if key not in output_features}
+    input_features = order_visual_input_features(
+        input_features,
+        list(
+            getattr(config.data, "image_key_order", DEFAULT_QWEN_GR00T_IMAGE_KEY_ORDER)
+            or DEFAULT_QWEN_GR00T_IMAGE_KEY_ORDER
+        ),
+    )
 
     policy = QwenGr00t(config=config)
     policy.input_features = input_features
