@@ -10,40 +10,39 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-from omegaconf import OmegaConf, DictConfig
 import numpy as np
-from PIL import Image
 import torch
 import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+from omegaconf import DictConfig, OmegaConf
+from PIL import Image
+from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
+from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from torch.optim import Optimizer
 
 from flagscale.logger import logger
-from flagscale.train.train_config import TrainConfig, DataConfig
+from flagscale.models.configs.types import FeatureType
+from flagscale.models.utils.constants import ACTION, OBS_PREFIX, PRETRAINED_MODEL_DIR, REWARD
+from flagscale.models.vla.qwen_gr00t import QwenGr00t
+from flagscale.models.vla.utils import order_visual_input_features
 from flagscale.train.datasets.lerobot_dataset import (
     LeRobotDataset,
     LeRobotDatasetMetadata,
 )
 from flagscale.train.datasets.utils import dataset_to_policy_features
 from flagscale.train.processor import PolicyProcessorPipeline
-from flagscale.models.utils.constants import ACTION, OBS_PREFIX, PRETRAINED_MODEL_DIR, REWARD
-from flagscale.models.configs.types import FeatureType
+from flagscale.train.train_config import DataConfig, TrainConfig
 from flagscale.train.utils.logging_utils import (
     AverageMeter,
     MetricsTracker,
     format_big_number,
 )
+from flagscale.train.utils.optim_setup import setup_optimizer_and_scheduler
 from flagscale.train.utils.train_utils import (
-    save_vla_checkpoint,
     get_step_checkpoint_dir,
+    save_vla_checkpoint,
     update_last_checkpoint,
 )
-from flagscale.train.utils.optim_setup import setup_optimizer_and_scheduler
-from flagscale.models.vla.qwen_gr00t import QwenGr00t
-from flagscale.models.vla.utils import order_visual_input_features
-
 
 DEFAULT_QWEN_GR00T_IMAGE_KEY_ORDER = [
     "observation.images.image",
@@ -196,7 +195,6 @@ def format_train_tracker_step(train_tracker: MetricsTracker) -> str:
     return " ".join(display_list)
 
 
-
 def make_policy(
     config: TrainConfig,
     ds_meta: LeRobotDatasetMetadata | None = None,
@@ -205,11 +203,7 @@ def make_policy(
 
     # Use == instead of `is` for FeatureType.ACTION comparison
     # because flagscale.FeatureType and lerobot.FeatureType are different enum classes
-    output_features = {
-        key: ft
-        for key, ft in features.items()
-        if ft.type == FeatureType.ACTION
-    }
+    output_features = {key: ft for key, ft in features.items() if ft.type == FeatureType.ACTION}
     input_features = {key: ft for key, ft in features.items() if key not in output_features}
     input_features = order_visual_input_features(
         input_features,
@@ -418,7 +412,9 @@ def update_policy(
         policy.update()
 
     train_metrics.loss = loss.item()
-    train_metrics.grad_norm = grad_norm.full_tensor().item() if hasattr(grad_norm, 'full_tensor') else grad_norm.item()
+    train_metrics.grad_norm = (
+        grad_norm.full_tensor().item() if hasattr(grad_norm, "full_tensor") else grad_norm.item()
+    )
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
 
@@ -438,7 +434,8 @@ def main(config: TrainConfig, seed: int):
     is_main_process = rank == 0
 
     if config.data.dataset_type == "wds":
-        from megatron.energon import get_train_dataset, get_loader, WorkerConfig
+        from megatron.energon import WorkerConfig, get_loader, get_train_dataset
+
         from flagscale.models.vla.qwen_gr00t_task_encoder import TaskEncoder
 
         policy = QwenGr00t(config=config)
@@ -450,7 +447,9 @@ def main(config: TrainConfig, seed: int):
             task_encoder=TaskEncoder(config.data.wds),
             shuffle_buffer_size=1000,
             max_samples_per_sequence=100,
-            worker_config=WorkerConfig.default_worker_config(num_workers=1, data_parallel_group=None),
+            worker_config=WorkerConfig.default_worker_config(
+                num_workers=1, data_parallel_group=None
+            ),
             repeat=True,
         )
         dataloader = get_loader(ds)
