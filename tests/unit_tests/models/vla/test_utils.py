@@ -1,8 +1,7 @@
 import unittest
 
 from flagscale.models.configs.types import FeatureType, PolicyFeature
-from flagscale.models.vla.utils import get_vlm_config
-from flagscale.models.vla.utils import order_visual_input_features
+from flagscale.models.vla.utils import get_vlm_config, order_visual_input_features
 
 
 class MockConfigDirect:
