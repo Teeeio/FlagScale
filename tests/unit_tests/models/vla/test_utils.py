@@ -1,7 +1,7 @@
 import unittest
 
 from flagscale.models.configs.types import FeatureType, PolicyFeature
-from flagscale.models.vla.utils import get_vlm_config, order_visual_input_features
+from flagscale.models.vla.utils import get_vlm_config, reorder_visual_input_features
 
 
 class MockConfigDirect:
@@ -45,7 +45,7 @@ class TestOrderVisualInputFeatures(unittest.TestCase):
             "observation.images.image": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 224, 224)),
         }
 
-        reordered = order_visual_input_features(
+        reordered = reorder_visual_input_features(
             input_features,
             ["observation.images.image", "observation.images.wrist_image"],
         )
@@ -68,7 +68,7 @@ class TestOrderVisualInputFeatures(unittest.TestCase):
             ),
         }
 
-        reordered = order_visual_input_features(
+        reordered = reorder_visual_input_features(
             input_features,
             ["observation.images.image"],
         )

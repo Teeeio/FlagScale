@@ -1,5 +1,6 @@
 # Mainly adopted from
 # https://github.com/huggingface/lerobot/blob/2b304eeb841ae6c371e3dd341bbbb9dd254b07cb/src/lerobot/scripts/lerobot_train.py
+# ruff: noqa: I001
 
 import argparse
 import os
@@ -10,47 +11,39 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+from omegaconf import OmegaConf, DictConfig
 import numpy as np
+from PIL import Image
 import torch
 import torch.distributed as dist
-from omegaconf import DictConfig, OmegaConf
-from PIL import Image
-from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
-from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from torch.optim import Optimizer
 
 from flagscale.logger import logger
-from flagscale.models.configs.types import FeatureType
-from flagscale.models.utils.constants import ACTION, OBS_PREFIX, PRETRAINED_MODEL_DIR, REWARD
-from flagscale.models.vla.qwen_gr00t import QwenGr00t
-from flagscale.models.vla.utils import order_visual_input_features
+from flagscale.train.train_config import TrainConfig, DataConfig
 from flagscale.train.datasets.lerobot_dataset import (
     LeRobotDataset,
     LeRobotDatasetMetadata,
 )
 from flagscale.train.datasets.utils import dataset_to_policy_features
 from flagscale.train.processor import PolicyProcessorPipeline
-from flagscale.train.train_config import DataConfig, TrainConfig
+from flagscale.models.utils.constants import ACTION, OBS_PREFIX, PRETRAINED_MODEL_DIR, REWARD
+from flagscale.models.configs.types import FeatureType
 from flagscale.train.utils.logging_utils import (
     AverageMeter,
     MetricsTracker,
     format_big_number,
 )
-from flagscale.train.utils.optim_setup import setup_optimizer_and_scheduler
 from flagscale.train.utils.train_utils import (
-    get_step_checkpoint_dir,
     save_vla_checkpoint,
+    get_step_checkpoint_dir,
     update_last_checkpoint,
 )
-
-DEFAULT_QWEN_GR00T_IMAGE_KEY_ORDER = [
-    "observation.images.image",
-    "observation.images.wrist_image",
-    "observation.images.base_0_rgb",
-    "observation.images.left_wrist_0_rgb",
-    "observation.images.right_wrist_0_rgb",
-]
+from flagscale.train.utils.optim_setup import setup_optimizer_and_scheduler
+from flagscale.models.vla.qwen_gr00t import QwenGr00t
+from flagscale.models.vla.utils import reorder_visual_input_features
 
 
 def set_seed(seed: int):
@@ -205,13 +198,10 @@ def make_policy(
     # because flagscale.FeatureType and lerobot.FeatureType are different enum classes
     output_features = {key: ft for key, ft in features.items() if ft.type == FeatureType.ACTION}
     input_features = {key: ft for key, ft in features.items() if key not in output_features}
-    input_features = order_visual_input_features(
-        input_features,
-        list(
-            getattr(config.data, "image_key_order", DEFAULT_QWEN_GR00T_IMAGE_KEY_ORDER)
-            or DEFAULT_QWEN_GR00T_IMAGE_KEY_ORDER
-        ),
-    )
+    # Preserve dataset feature order unless the recipe explicitly requests a visual reorder.
+    image_key_order = list(getattr(config.data, "image_key_order", []) or [])
+    if image_key_order:
+        input_features = reorder_visual_input_features(input_features, image_key_order)
 
     policy = QwenGr00t(config=config)
     policy.input_features = input_features
@@ -434,8 +424,7 @@ def main(config: TrainConfig, seed: int):
     is_main_process = rank == 0
 
     if config.data.dataset_type == "wds":
-        from megatron.energon import WorkerConfig, get_loader, get_train_dataset
-
+        from megatron.energon import get_train_dataset, get_loader, WorkerConfig
         from flagscale.models.vla.qwen_gr00t_task_encoder import TaskEncoder
 
         policy = QwenGr00t(config=config)
