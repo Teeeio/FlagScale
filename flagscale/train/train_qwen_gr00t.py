@@ -196,7 +196,11 @@ def make_policy(
 
     # Use == instead of `is` for FeatureType.ACTION comparison
     # because flagscale.FeatureType and lerobot.FeatureType are different enum classes
-    output_features = {key: ft for key, ft in features.items() if ft.type == FeatureType.ACTION}
+    output_features = {
+        key: ft
+        for key, ft in features.items()
+        if ft.type == FeatureType.ACTION
+    }
     input_features = {key: ft for key, ft in features.items() if key not in output_features}
     # Preserve dataset feature order unless the recipe explicitly requests a visual reorder.
     image_key_order = list(getattr(config.data, "image_key_order", []) or [])
@@ -402,9 +406,7 @@ def update_policy(
         policy.update()
 
     train_metrics.loss = loss.item()
-    train_metrics.grad_norm = (
-        grad_norm.full_tensor().item() if hasattr(grad_norm, "full_tensor") else grad_norm.item()
-    )
+    train_metrics.grad_norm = grad_norm.full_tensor().item() if hasattr(grad_norm, 'full_tensor') else grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
 
@@ -436,9 +438,7 @@ def main(config: TrainConfig, seed: int):
             task_encoder=TaskEncoder(config.data.wds),
             shuffle_buffer_size=1000,
             max_samples_per_sequence=100,
-            worker_config=WorkerConfig.default_worker_config(
-                num_workers=1, data_parallel_group=None
-            ),
+            worker_config=WorkerConfig.default_worker_config(num_workers=1, data_parallel_group=None),
             repeat=True,
         )
         dataloader = get_loader(ds)
