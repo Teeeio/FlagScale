@@ -10,19 +10,16 @@ import torch
 import websockets
 from omegaconf import OmegaConf
 
-from flagscale.models.configs.types import FeatureType, PolicyFeature
 from flagscale.models.utils.constants import ACTION
 from flagscale.serve import msgpack_numpy
 from flagscale.serve.run_serve_vla import Policy
 from flagscale.serve.websocket_policy_server import WebsocketPolicyServer
-
-
-def _visual(shape=(32, 48, 3)):
-    return PolicyFeature(type=FeatureType.VISUAL, shape=shape)
-
-
-def _state(shape=(8,)):
-    return PolicyFeature(type=FeatureType.STATE, shape=shape)
+from flagscale.train.processor import (
+    DataProcessorPipeline,
+    DeviceProcessorStep,
+    RenameObservationsProcessorStep,
+)
+from flagscale.train.processor.batch_processor import AddBatchDimensionProcessorStep
 
 
 def _unused_port() -> int:
@@ -45,27 +42,6 @@ async def _wait_until_server_ready(host: str, port: int, *, timeout_s: float = 5
             await asyncio.sleep(0.05)
 
 
-class _FakePreprocessor:
-    class _Step:
-        features = {
-            "observation.images.image": _visual(),
-            "observation.images.wrist_image": _visual(),
-            "observation.state": _state(),
-            ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(2,)),
-        }
-
-    steps = [_Step()]
-
-    def __call__(self, batch):
-        processed = dict(batch)
-        for key, value in list(processed.items()):
-            if isinstance(value, torch.Tensor) and value.ndim in (1, 3):
-                processed[key] = value.unsqueeze(0)
-        if isinstance(processed.get("task"), str):
-            processed["task"] = [processed["task"]]
-        return processed
-
-
 class _FakePostprocessor:
     def __call__(self, batch):
         processed = dict(batch)
@@ -73,21 +49,19 @@ class _FakePostprocessor:
         return processed
 
 
-# Mirror the QwenGr00t serving contract: batched tensors in, ACTION dict out.
+# Mirror the QwenGr00t serving contract: internal observation keys + batched tensors in, ACTION dict out.
 class _FakeModel:
     def __init__(self):
-        self.input_features = {
-            "observation.images.image": _visual(),
-            "observation.images.wrist_image": _visual(),
-            "observation.state": _state(),
-        }
-        self._config = OmegaConf.create(
-            {"data": {"vla_data": {"default_image_resolution": [3, 32, 48]}}}
-        )
         self.last_batch = None
 
     def predict_action(self, batch):
         self.last_batch = batch
+        assert {
+            "observation.images.image",
+            "observation.images.wrist_image",
+            "observation.state",
+            "task",
+        }.issubset(batch)
         assert batch["observation.images.image"].shape == (1, 32, 48, 3)
         assert batch["observation.images.wrist_image"].shape == (1, 32, 48, 3)
         assert batch["observation.state"].shape == (1, 8)
@@ -95,18 +69,30 @@ class _FakeModel:
         return {ACTION: torch.tensor([[[1.0, 2.0], [3.0, 4.0]]], dtype=torch.float32)}
 
 
-class _FakeModelWithoutInputFeatures(_FakeModel):
-    def __init__(self):
-        super().__init__()
-        self.input_features = {}
+def _base_preprocessor():
+    # The saved checkpoint preprocessor already contains rename/to_batch/device in QwenGr00t training.
+    return DataProcessorPipeline(
+        steps=[AddBatchDimensionProcessorStep()],
+        name="PolicyPreprocessor",
+    )
 
 
-@pytest.mark.asyncio
-async def test_websocket_policy_server_smoke_with_starvla_payload():
-    host = "127.0.0.1"
-    port = _unused_port()
-    model = _FakeModel()
-    config = OmegaConf.create(
+def _preprocessor_from_overrides(*args, **kwargs):
+    overrides = kwargs["overrides"]
+    return DataProcessorPipeline(
+        steps=[
+            RenameObservationsProcessorStep(
+                rename_map=overrides["rename_observations_processor"]["rename_map"]
+            ),
+            AddBatchDimensionProcessorStep(),
+            DeviceProcessorStep(device=overrides["device_processor"]["device"]),
+        ],
+        name="PolicyPreprocessor",
+    )
+
+
+def _policy_config(host: str, port: int):
+    return OmegaConf.create(
         {
             "engine_args": {
                 "host": host,
@@ -114,16 +100,42 @@ async def test_websocket_policy_server_smoke_with_starvla_payload():
                 "model_variant": "FakeVariant",
                 "model": "/tmp/fake-checkpoint",
                 "device": "cpu",
-                "missing_image_policy": "error",
+                "image_hw": [32, 48],
+                "protocol": {
+                    "env_name": "test_protocol",
+                    "image_key": "observation/image",
+                    "wrist_image_key": "observation/wrist_image",
+                    "state_key": "observation/state",
+                    "prompt_key": "prompt",
+                    "actions_key": "actions",
+                },
+                "rename_map": {
+                    "observation.image": "observation.images.image",
+                    "observation.wrist_image": "observation.images.wrist_image",
+                    "observation.state": "observation.state",
+                },
+                "task_key": "task",
             }
         }
     )
 
+
+@pytest.mark.asyncio
+async def test_websocket_policy_server_smoke_with_protocol_payload():
+    host = "127.0.0.1"
+    port = _unused_port()
+    model = _FakeModel()
+    config = _policy_config(host, port)
+
     with (
         patch(
             "flagscale.serve.run_serve_vla.load_checkpoint",
-            return_value=(model, _FakePreprocessor(), _FakePostprocessor()),
+            return_value=(model, _base_preprocessor(), _FakePostprocessor()),
         ),
+        patch(
+            "flagscale.serve.run_serve_vla.DataProcessorPipeline.from_pretrained",
+            side_effect=_preprocessor_from_overrides,
+        ) as mocked_preprocessor,
         patch(
             "flagscale.serve.run_serve_vla.importlib.import_module",
             return_value=SimpleNamespace(FakeVariant=object),
@@ -131,11 +143,27 @@ async def test_websocket_policy_server_smoke_with_starvla_payload():
     ):
         policy = Policy(config)
 
+    step_names = [
+        getattr(step.__class__, "_registry_name", step.__class__.__name__)
+        for step in policy.preprocessor.steps
+    ]
+    assert step_names == ["rename_observations_processor", "to_batch_processor", "device_processor"]
+    assert mocked_preprocessor.call_args.kwargs["overrides"] == {
+        "rename_observations_processor": {
+            "rename_map": {
+                "observation.image": "observation.images.image",
+                "observation.wrist_image": "observation.images.wrist_image",
+                "observation.state": "observation.state",
+            }
+        },
+        "device_processor": {"device": "cpu"},
+    }
+
     server = WebsocketPolicyServer(
         policy=policy,
         host=host,
         port=port,
-        metadata={"env": "starvla_sim"},
+        metadata=policy.server_metadata,
     )
     server_task = asyncio.create_task(server.run())
     await _wait_until_server_ready(host, port)
@@ -143,7 +171,7 @@ async def test_websocket_policy_server_smoke_with_starvla_payload():
     try:
         async with websockets.connect(f"ws://{host}:{port}", proxy=None) as websocket:
             metadata = msgpack_numpy.unpackb(await websocket.recv())
-            assert metadata == {"env": "starvla_sim"}
+            assert metadata == {"env": "test_protocol"}
 
             observation = {
                 "observation/image": np.zeros((80, 96, 3), dtype=np.uint8),
@@ -162,38 +190,3 @@ async def test_websocket_policy_server_smoke_with_starvla_payload():
     assert response["actions"] == [[1.5, 2.5], [3.5, 4.5]]
     assert "server_timing" in response
     assert "infer_ms" in response["server_timing"]
-
-
-def test_policy_backfills_model_input_features_from_preprocessor():
-    config = OmegaConf.create(
-        {
-            "engine_args": {
-                "host": "127.0.0.1",
-                "port": 5000,
-                "model_variant": "FakeVariant",
-                "model": "/tmp/fake-checkpoint",
-                "device": "cpu",
-                "missing_image_policy": "error",
-            }
-        }
-    )
-    model = _FakeModelWithoutInputFeatures()
-    preprocessor = _FakePreprocessor()
-
-    with (
-        patch(
-            "flagscale.serve.run_serve_vla.load_checkpoint",
-            return_value=(model, preprocessor, _FakePostprocessor()),
-        ),
-        patch(
-            "flagscale.serve.run_serve_vla.importlib.import_module",
-            return_value=SimpleNamespace(FakeVariant=object),
-        ),
-    ):
-        policy = Policy(config)
-
-    assert sorted(policy.model.input_features) == [
-        "observation.images.image",
-        "observation.images.wrist_image",
-        "observation.state",
-    ]

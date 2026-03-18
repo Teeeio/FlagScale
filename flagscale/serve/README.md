@@ -92,111 +92,92 @@ All the args remain the same as vLLM.
 
 ## Qwen-GR00T VLA Serving
 
-The unified VLA serving entrypoint is `flagscale/serve/run_serve_vla.py`. It is wired into the `qwen_gr00t` serve example and accepts the starVLA simulation websocket protocol.
+The unified VLA serving entrypoint is `flagscale/serve/run_serve_vla.py`. It currently supports `QwenGr00t` only. `flagscale/serve/run_serve_qwen_gr00t.py` is removed; `qwen_gr00t` serving now goes through the unified entrypoint.
 
-### Recommended Launch Path
-
-Use the example config:
+### Launch
 
 ```shell
 cd FlagScale
 python -m flagscale.cli serve qwen_gr00t -c ./examples/qwen_gr00t/conf/serve.yaml
 ```
 
-The default `engine_args.model` in the example config is a placeholder path. Replace it
-with your actual checkpoint directory before serving, or pass it with `--model-path`.
-The path must point to the checkpoint step directory that directly contains
-`pretrained_model`, for example `/path/to/outputs/.../checkpoints/030000` or
-`/path/to/outputs/.../checkpoints/last`.
+Set `engine_args.model` to the checkpoint step directory that directly contains `pretrained_model`, for example `/path/to/outputs/.../checkpoints/030000` or `/path/to/outputs/.../checkpoints/last`.
 
-You can override the checkpoint path and runtime fields from the command line:
+### Required Config
 
-```shell
-cd FlagScale
-python -m flagscale.cli serve qwen_gr00t \
-  -c ./examples/qwen_gr00t/conf/serve.yaml \
-  --model-path /abs/path/to/checkpoint \
-  --port 5000 \
-  --engine-args '{"device":"cuda","missing_image_policy":"error"}'
-```
+The `qwen_gr00t` serve config declares:
 
-If your shell-level `flagscale` command does not show `-c/--config` in `serve --help`,
-it is likely resolving a different package entrypoint. In that case, keep using
-`python -m flagscale.cli ...` from the FlagScale repo root, or reinstall this repo's
-CLI entrypoint with `pip install -e .` in the environment where you run FlagScale.
+- `engine_args.protocol`: websocket/msgpack request and response keys
+- `engine_args.rename_map`: canonical observation keys to internal Qwen-GR00T observation keys
+- `engine_args.task_key`: internal task key
+- `engine_args.image_hw`: resize target `[H, W]`
 
-The runtime GPU selection is controlled by `experiment.envs.CUDA_VISIBLE_DEVICES`
-in `examples/qwen_gr00t/conf/serve.yaml`.
-
-### Direct Script Launch
-
-If you want to invoke the entrypoint directly:
-
-```shell
-cd FlagScale
-export PYTHONPATH=$(pwd):$PYTHONPATH
-python flagscale/serve/run_serve_vla.py \
-  --config-path /abs/path/to/serve_runtime.yaml \
-  --log-dir /tmp/flagscale_serve_logs
-```
-
-The direct script expects a YAML file with a top-level `serve:` list, for example:
+Example:
 
 ```yaml
-serve:
-  - serve_id: local_vla
-    engine_args:
-      host: 0.0.0.0
-      port: 5000
-      model_variant: QwenGr00t
-      model: /abs/path/to/checkpoint
-      device: cuda
-      missing_image_policy: error
+engine_args:
+  model_variant: QwenGr00t
+  model: /abs/path/to/checkpoint
+  device: cuda
+  image_hw: [224, 224]
+  protocol:
+    env_name: starvla_sim
+    image_key: observation/image
+    wrist_image_key: observation/wrist_image
+    state_key: observation/state
+    prompt_key: prompt
+    actions_key: actions
+  rename_map:
+    observation.image: observation.images.image
+    observation.wrist_image: observation.images.wrist_image
+    observation.state: observation.state
+  task_key: task
 ```
 
-### Runtime Arguments
+### Protocol
 
-Common `engine_args` for the VLA runner:
+The example protocol matches the starVLA simulation websocket contract:
 
-- `model_variant`: currently use `QwenGr00t`
-- `model`: checkpoint directory
-- `device`: runtime device such as `cuda`
-- `host`: bind address, default `0.0.0.0`
-- `port`: websocket port, default `5000`
-- `missing_image_policy`: `error` or `black`, default `error`
+- request keys: `observation/image`, `observation/wrist_image`, `observation/state`, `prompt`, optional `observation/image_right`
+- response key: `actions`
 
-Optional `engine_args`:
+The default Qwen-Gr00t example is configured for the two-view checkpoint validated in local GPU testing. If your checkpoint expects a third image input, add `protocol.right_image_key` and the corresponding `rename_map` entry for `observation.image_right`.
 
-- `image_hw`: override auto-resolved resize target as `[H, W]`
-- `state_key`: override the resolved internal state feature key
-- `starvla_slot_map`: explicitly map starVLA visual slots to internal visual feature keys
-
-### Request And Response Protocol
-
-The websocket request follows the starVLA simulation key layout:
-
-- `observation/image`
-- `observation/wrist_image`
-- `observation/state`
-- `prompt`
-- optional `observation/image_right`
-
-The server response is:
+The runner validates the configured protocol keys, converts the request into canonical observation keys, applies `rename_observations_processor` through preprocessor overrides, resizes images to `engine_args.image_hw`, and returns:
 
 ```python
 {"actions": [[...], [...], ...]}
 ```
 
-The runner automatically:
+### Minimal Request Example
 
-- remaps external starVLA keys to internal model feature keys using checkpoint/model features when available
-- resizes images before the checkpoint preprocessor runs
-- preserves the checkpoint pre/postprocessor pipeline
+```python
+import asyncio
 
-### Current Support Scope
+import numpy as np
+import websockets
 
-At the moment, this serving path only supports `QwenGr00t`.
+from flagscale.serve import msgpack_numpy
 
-Other VLA models are not declared supported yet and will be added separately.
 
-For Qwen-GR00T checkpoints, both common 2-view and 3-view naming patterns are handled by the automatic starVLA slot inference logic.
+async def main():
+    async with websockets.connect("ws://127.0.0.1:5000", proxy=None) as websocket:
+        metadata = msgpack_numpy.unpackb(await websocket.recv())
+        print("metadata:", metadata)
+
+        request = {
+            "observation/image": np.zeros((224, 224, 3), dtype=np.uint8),
+            "observation/wrist_image": np.zeros((224, 224, 3), dtype=np.uint8),
+            "observation/state": np.zeros((8,), dtype=np.float32),
+            "prompt": "Open the drawer",
+        }
+
+        await websocket.send(msgpack_numpy.packb(request))
+        response = msgpack_numpy.unpackb(await websocket.recv())
+        print(response["actions"])
+
+
+asyncio.run(main())
+```
+
+The response is a msgpack-encoded dict that always includes `actions`. The server may also include extra fields such as `server_timing`.

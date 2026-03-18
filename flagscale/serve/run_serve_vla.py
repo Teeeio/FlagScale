@@ -1,19 +1,25 @@
 import argparse
 import importlib
 import time
+from collections.abc import Mapping
 
 import torch
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from flagscale.logger import logger
-from flagscale.models.utils.constants import ACTION
-from flagscale.serve.vla_starvla_adapter import (
-    StarVLASimAdapter,
-    extract_policy_input_features,
-    resolve_policy_image_hw,
-    resolve_policy_input_layout,
+from flagscale.models.configs.types import FeatureType
+from flagscale.models.utils.constants import ACTION, PRETRAINED_MODEL_DIR
+from flagscale.serve.vla_protocol_adapter import (
+    CANONICAL_IMAGE_KEY,
+    CANONICAL_RIGHT_IMAGE_KEY,
+    CANONICAL_STATE_KEY,
+    CANONICAL_WRIST_IMAGE_KEY,
+    VLAProtocolAdapter,
+    build_qwen_gr00t_serve_contract,
+    build_request_protocol,
 )
 from flagscale.serve.websocket_policy_server import WebsocketPolicyServer
+from flagscale.train.processor import DataProcessorPipeline
 from flagscale.train.utils.train_utils import load_checkpoint
 
 
@@ -27,6 +33,7 @@ class Policy:
         self.preprocessor = None
         self.postprocessor = None
         self.adapter = None
+        self.server_metadata = {}
 
         self.load_model()
 
@@ -37,34 +44,48 @@ class Policy:
         self.model, self.preprocessor, self.postprocessor = load_checkpoint(
             self.config_engine.model, policy_cls, self.config_engine.device
         )
+        _backfill_model_input_features(self.model, self.preprocessor)
 
-        input_features = extract_policy_input_features(self.model, self.preprocessor)
-        # Older checkpoints may only persist feature metadata inside the serialized
-        # preprocessor. Recover it here so predict_action can still resolve image keys.
-        if hasattr(self.model, "input_features") and not getattr(
-            self.model, "input_features", None
-        ):
-            self.model.input_features = input_features
-        image_hw = resolve_policy_image_hw(
-            getattr(self.model, "_config", None),
-            input_features,
-            config_image_hw=_resolve_config_image_hw(self.config_engine),
+        protocol = build_request_protocol(self.config_engine.get("protocol"))
+        rename_map = _build_rename_map(self.config_engine.get("rename_map"))
+        _validate_protocol_mapping(rename_map, protocol)
+
+        require_right_image = (
+            protocol.right_image_key is not None and CANONICAL_RIGHT_IMAGE_KEY in rename_map
         )
-        input_layout = resolve_policy_input_layout(
-            input_features,
-            state_key=self.config_engine.get("state_key"),
-            image_hw=image_hw,
-            explicit_visual_slot_map=self.config_engine.get("starvla_slot_map"),
+        self.adapter = VLAProtocolAdapter(
+            protocol=protocol,
+            serve_contract=build_qwen_gr00t_serve_contract(
+                task_key=self.config_engine.get("task_key"),
+                require_right_image=require_right_image,
+                image_hw=_resolve_config_image_hw(self.config_engine),
+            ),
         )
-        self.adapter = StarVLASimAdapter(
-            input_layout=input_layout,
-            missing_image_policy=self.config_engine.get("missing_image_policy", "error"),
+        self.preprocessor = _load_preprocessor_with_overrides(
+            checkpoint_dir=self.config_engine.model,
+            rename_map=rename_map,
+            device=str(self.config_engine.device),
         )
+        self.server_metadata = {"env": self.adapter.protocol.env_name}
 
         logger.info(f"Policy model loading latency: {time.perf_counter() - t_s:.2f}s")
-        logger.info(f"Resolved visual slot map: {self.adapter.input_layout.visual_slot_map}")
-        logger.info(f"Resolved state key: {self.adapter.input_layout.state_key}")
-        logger.info(f"Resolved image size: {self.adapter.input_layout.image_hw}")
+        logger.info(
+            "Configured request protocol: "
+            f"env={self.adapter.protocol.env_name}, "
+            f"image={self.adapter.protocol.image_key}, "
+            f"wrist={self.adapter.protocol.wrist_image_key}, "
+            f"right={self.adapter.protocol.right_image_key}, "
+            f"state={self.adapter.protocol.state_key}, "
+            f"prompt={self.adapter.protocol.prompt_key}, "
+            f"actions={self.adapter.protocol.actions_key}"
+        )
+        logger.info(
+            "Configured QwenGr00t serving contract: "
+            f"task={self.adapter.serve_contract.task_key}, "
+            f"require_right_image={self.adapter.serve_contract.require_right_image}"
+        )
+        logger.info(f"Configured rename_map: {rename_map}")
+        logger.info(f"Configured image size: {self.adapter.serve_contract.image_hw}")
 
     def inference(self, observation):
         if self.adapter is None:
@@ -103,6 +124,76 @@ def _resolve_config_image_hw(engine_cfg) -> tuple[int, int] | None:
     return None
 
 
+def _build_rename_map(rename_map_cfg: Mapping[str, str] | None) -> dict[str, str]:
+    if not rename_map_cfg:
+        raise ValueError("Serving expects engine_args.rename_map to define observation remapping.")
+
+    rename_map: dict[str, str] = {}
+    for source_key, target_key in rename_map_cfg.items():
+        if not isinstance(source_key, str) or not source_key:
+            raise ValueError("Serving expects rename_map keys to be non-empty strings.")
+        if not isinstance(target_key, str) or not target_key:
+            raise ValueError("Serving expects rename_map values to be non-empty strings.")
+        rename_map[source_key] = target_key
+    return rename_map
+
+
+def _validate_protocol_mapping(rename_map: dict[str, str], protocol) -> None:
+    required_sources = [CANONICAL_IMAGE_KEY, CANONICAL_WRIST_IMAGE_KEY, CANONICAL_STATE_KEY]
+    missing_sources = [
+        source_key for source_key in required_sources if source_key not in rename_map
+    ]
+    if missing_sources:
+        raise ValueError(
+            f"Serving rename_map is missing required observation mappings for {missing_sources}."
+        )
+    if protocol.prompt_key in rename_map:
+        raise ValueError(
+            "Serving rename_map only applies to observation keys. Configure prompt -> task with "
+            "engine_args.task_key instead."
+        )
+
+
+def _load_preprocessor_with_overrides(
+    *, checkpoint_dir: str, rename_map: dict[str, str], device: str
+):
+    pretrained_dir = f"{checkpoint_dir}/{PRETRAINED_MODEL_DIR}"
+    return DataProcessorPipeline.from_pretrained(
+        pretrained_model_name_or_path=pretrained_dir,
+        config_filename="policy_preprocessor.json",
+        overrides={
+            "rename_observations_processor": {"rename_map": rename_map},
+            "device_processor": {"device": device},
+        },
+    )
+
+
+def _backfill_model_input_features(model, preprocessor) -> None:
+    if getattr(model, "input_features", None):
+        return
+    if preprocessor is None:
+        return
+
+    recovered_features = None
+    for step in getattr(preprocessor, "steps", []):
+        step_features = getattr(step, "features", None)
+        if step_features:
+            recovered_features = {
+                key: feature
+                for key, feature in step_features.items()
+                if getattr(feature, "type", None) is not FeatureType.ACTION
+            }
+            if recovered_features:
+                break
+
+    if recovered_features:
+        model.input_features = recovered_features
+        logger.info(
+            "Recovered model.input_features from checkpoint preprocessor for serving "
+            f"({list(recovered_features.keys())})."
+        )
+
+
 def parse_config() -> DictConfig | ListConfig:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -120,7 +211,7 @@ def main(config):
         policy=policy,
         host=policy.host,
         port=policy.port,
-        metadata={"env": "starvla_sim"},
+        metadata=policy.server_metadata,
     )
     logger.info("Server running ...")
     server.serve_forever()

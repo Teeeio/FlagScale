@@ -290,19 +290,28 @@ Configure the following fields:
 - `engine_args.model_variant` - Model variant (default: `"QwenGr00t"`)
 - `engine_args.model` - Path to trained checkpoint (e.g., `/workspace/outputs/qwen_gr00t_train/checkpoints/last`)
 - `engine_args.device` - Device to use (e.g., `"cuda"`)
+- `engine_args.image_hw` - Target image size for serving input resize
+- `engine_args.protocol` - External websocket/msgpack request-response key schema
+- `engine_args.rename_map` - Observation key remapping from canonical serving observation keys (`observation.image`, `observation.wrist_image`, `observation.state`) to Qwen-GR00T observation keys
+- `engine_args.task_key` - Internal key used for the task string
 
 ### Run Serving
 
 ```sh
 cd FlagScale/
-flagscale serve qwen_gr00t -c ./examples/qwen_gr00t/conf/serve.yaml
+python -m flagscale.cli serve qwen_gr00t -c ./examples/qwen_gr00t/conf/serve.yaml
 ```
 
-Serving logs are saved to `outputs/<exp_name>/logs/host_0_localhost.output` by default.
+Serving logs are saved to `outputs/<exp_name>/serve_logs/host_0_localhost.output` by default.
+
+Qwen-GR00T serving now uses the unified VLA entrypoint `flagscale/serve/run_serve_vla.py`.
+For the full serving protocol, runtime arguments, and serving key conventions,
+see `flagscale/serve/README.md`.
+The default serving example is configured for the two-view Qwen-GR00T checkpoint validated locally; add `observation/image_right` mappings only if your checkpoint requires a third camera input.
 
 ### Stop Serving
 
 ```sh
 cd FlagScale/
-flagscale serve qwen_gr00t --stop
+python -m flagscale.cli serve qwen_gr00t --stop
 ```
