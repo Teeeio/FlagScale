@@ -101,7 +101,7 @@ cd FlagScale
 python -m flagscale.cli serve qwen_gr00t -c ./examples/qwen_gr00t/conf/serve.yaml
 ```
 
-Set `engine_args.model` to the checkpoint step directory that directly contains `pretrained_model`, for example `/path/to/outputs/.../checkpoints/030000` or `/path/to/outputs/.../checkpoints/last`.
+Set `engine_args.model` to the checkpoint step directory that directly contains `pretrained_model`
 
 ### Required Config
 
