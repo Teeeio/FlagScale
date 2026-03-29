@@ -24,9 +24,22 @@ Install FlagScale and robotics dependencies:
 
 ```sh
 cd FlagScale/
-# replace "[cuda-train]" with "[ascend-train]" on Huawei Ascend, or "[musa-train]" on Moore Threads MUSA
+# For NVIDIA CUDA training
 pip install ".[cuda-train]" --verbose
+
+# For NVIDIA CUDA serving
+pip install ".[cuda-serve]" --verbose
+
+# Replace "cuda-train" in the training command above with "ascend-train"
+# on Huawei Ascend, or "musa-train" on Moore Threads MUSA.
+
+# Additional GR00T N1.5 runtime dependencies
+pip install peft torchcodec
 ```
+
+GR00T N1.5 also requires:
+- `flash-attn` built against the current `torch` version
+- FFmpeg runtime libraries for `torchcodec`
 
 Install additional dependencies for downloading models/datasets:
 
@@ -204,7 +217,7 @@ Configure the following fields:
 - `engine_args.host` - Server host (default: `"0.0.0.0"`)
 - `engine_args.port` - Server port (default: `5000`)
 - `engine_args.model_variant` - Model variant: `"Gr00tN15"`
-- `engine_args.model` - Path to pretrained or fine-tuned model checkpoint (e.g., `/workspace/models/nvidia/GR00T-N1.5-3B`)
+- `engine_args.model` - Path to a training checkpoint directory (e.g., `outputs/gr00t_n1_5_train/checkpoints/last`). The checkpoint should contain `pretrained_model/train_config.yaml` and `pretrained_model/model.safetensors`
 - `engine_args.device` - Device to use (e.g., `"cuda"`, `"npu"`, `"musa"`)
 
 ### Run Serving
