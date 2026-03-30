@@ -34,7 +34,7 @@ pip install ".[cuda-serve]" --verbose
 # on Huawei Ascend, or [musa-train] on Moore Threads MUSA.
 
 # Additional GR00T N1.5 runtime dependencies
-pip install peft torchcodec
+pip install "peft==0.18.1" torchcodec
 ```
 
 GR00T N1.5 also requires:
