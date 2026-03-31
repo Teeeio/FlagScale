@@ -32,14 +32,10 @@ pip install ".[cuda-serve]" --verbose
 
 # Replace [cuda-train] in the training command above with [ascend-train]
 # on Huawei Ascend, or [musa-train] on Moore Threads MUSA.
-
-# Additional GR00T N1.5 runtime dependencies
-pip install "peft==0.18.1" torchcodec
 ```
 
-GR00T N1.5 also requires:
-- `flash-attn` built against the current `torch` version
-- FFmpeg runtime libraries for `torchcodec`
+GR00T N1.5 requires FFmpeg runtime libraries for `torchcodec`.
+Install FFmpeg before running training or dataset preprocessing.
 
 Install FFmpeg using one of the following options:
 
