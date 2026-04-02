@@ -91,9 +91,10 @@ run_test() {
     fi
 
     # Map task name to flagscale CLI subcommand
-    # e.g. hetero_train -> train, train -> train, others unchanged
+    # e.g. hetero_train -> train, train -> train, benchmark -> train, others unchanged
     local cli_task="$task"
     case "$task" in
+        benchmark) cli_task="train" ;;
         *train*) cli_task="train" ;;
     esac
 
@@ -109,6 +110,9 @@ run_test() {
     #   - *: Unsupported task type, throw error and exit execution
     local compare_function
     case "$task" in
+        benchmark)
+            compare_function="test_benchmark_equal"
+            ;;
         *train*)
             compare_function="test_train_equal"
             ;;
@@ -141,8 +145,46 @@ run_test() {
 
         # For serve tasks, wait for the service to be fully ready before validation
         if [ "$task" = "serve" ]; then
-            log_info "Waiting 1 minute for service to be ready..."
-            sleep 1m
+            local serve_port
+            serve_port=$(grep -oP 'port:\s*\K[0-9]+' "$config_file" | head -1)
+
+            local max_wait=600   # ascend: 10 min
+            [ "$PLATFORM" != "ascend" ] && max_wait=180   # others: 1 min
+            local interval=10
+            local elapsed=0
+            local ready=0
+
+            if [ -z "$serve_port" ]; then
+                log_info "Could not extract serve port from config, skipping health check"
+                ready=1
+            else
+                log_info "Waiting for service on port $serve_port (timeout: ${max_wait}s)..."
+                while [ $elapsed -lt $max_wait ]; do
+                    local http_code
+                    http_code=$(curl --silent --max-time 5 --output /dev/null \
+                        --write-out "%{http_code}" \
+                        "http://localhost:${serve_port}/health" 2>/dev/null)
+                    if [ "$http_code" = "200" ]; then
+                        log_info "Service is ready on port $serve_port (${elapsed}s elapsed)"
+                        ready=1
+                        break
+                    fi
+                    # Fall back: any non-zero HTTP response means the server is up
+                    if [ -n "$http_code" ] && [ "$http_code" != "000" ]; then
+                        log_info "Service responded (HTTP $http_code) on port $serve_port (${elapsed}s elapsed)"
+                        ready=1
+                        break
+                    fi
+                    sleep $interval
+                    elapsed=$((elapsed + interval))
+                    log_info "Still waiting for service on port $serve_port... (${elapsed}s / ${max_wait}s)"
+                done
+            fi
+
+            if [ $ready -eq 0 ]; then
+                log_error "Service did not become ready within ${max_wait}s on port $serve_port"
+                return 1
+            fi
         fi
 
         if ! "${validator_cmd[@]}"; then
